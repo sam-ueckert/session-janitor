@@ -1,0 +1,30 @@
+{
+  "gateways": [
+    {
+      "name": "default",
+      "configDir": "~/.openclaw",
+      "sessionsDir": "~/.openclaw/agents/main/sessions",
+      "port": 18789,
+      "token": ""
+    }
+  ],
+  "trimMaxKB": 250,
+  "keepPairs": 10,
+  "archiveRetentionDays": 7,
+  "orphanGraceMinutes": 30,
+  "staleSubagentHours": 24,
+  "staleCronSessionHours": 24,
+  "llmExtraction": {
+    "enabled": true,
+    "maxPerRun": 1,
+    "maxInputChars": 20000,
+    "timeoutSecs": 60
+  },
+  "memCli": {
+    "enabled": false,
+    "path": "mem"
+  },
+  "stateFile": "~/.openclaw/session-janitor-state.json",
+  "cronSchedule": "*/15 * * * *",
+  "logFile": "/tmp/session-janitor.log"
+}
