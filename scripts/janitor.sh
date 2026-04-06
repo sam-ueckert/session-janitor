@@ -23,12 +23,14 @@ import os
 vals = {
     'TRIM_MAX_KB': c.get('trimMaxKB', 250),
     'KEEP_PAIRS': c.get('keepPairs', 10),
+    'KEEP_FULL_PAIRS': c.get('keepFullPairs', 2),
     'ARCHIVE_RETENTION_DAYS': c.get('archiveRetentionDays', 7),
     'ORPHAN_GRACE_MINUTES': c.get('orphanGraceMinutes', 30),
     'STALE_SUBAGENT_HOURS': c.get('staleSubagentHours', 24),
     'STALE_CRON_SESSION_HOURS': c.get('staleCronSessionHours', 24),
     'LLM_ENABLED': str(c.get('llmExtraction',{}).get('enabled', False)).lower(),
     'LLM_MAX_PER_RUN': c.get('llmExtraction',{}).get('maxPerRun', 1),
+    'LLM_GATEWAY': c.get('llmExtraction',{}).get('gateway', ''),
     'MEM_ENABLED': str(c.get('memCli',{}).get('enabled', False)).lower(),
     'MEM_PATH': c.get('memCli',{}).get('path', 'mem'),
     'STATE_FILE': os.path.expanduser(c.get('stateFile', '~/.openclaw/session-janitor-state.json')),
@@ -56,6 +58,24 @@ print(v)
 }
 
 LLM_EXTRACTIONS_THIS_RUN=0
+
+# Resolve LLM gateway port/token (prefer llmExtraction.gateway name, fall back to first gateway)
+get_llm_gateway_field() {
+    local field="$1"
+    python3 -c "
+import json, os
+c = json.load(open('$CONFIG_FILE'))
+gws = c.get('gateways', [])
+pref = c.get('llmExtraction', {}).get('gateway', '')
+gw = next((g for g in gws if g.get('name') == pref), gws[0] if gws else {})
+v = gw.get('$field', '')
+if isinstance(v, str) and '~' in v: v = os.path.expanduser(v)
+print(v)
+"
+}
+
+LLM_PORT=$(get_llm_gateway_field port)
+LLM_TOKEN=$(get_llm_gateway_field token)
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -100,7 +120,7 @@ for v in d.get('sessions', d).values():
             # ACTIVE session — trim if oversized
             if (( size_kb > TRIM_MAX_KB )); then
                 log "$name: active transcript $sid is ${size_kb}KB — trimming to last $KEEP_PAIRS pairs"
-                if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" 2>&1; then
+                if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" 2>&1; then
                     reset_count=$((reset_count + 1))
 
                     # LLM extraction of archived content
@@ -108,10 +128,10 @@ for v in d.get('sessions', d).values():
                         local pre_trim_file
                         pre_trim_file=$(ls -t "${jsonl}.pre-trim."* 2>/dev/null | head -1)
                         if [[ -n "$pre_trim_file" ]]; then
-                            local llm_api_url="http://127.0.0.1:${port}"
+                            local llm_api_url="http://127.0.0.1:${LLM_PORT}"
                             if python3 "$SCRIPTS_DIR/extract-llm.py" \
                                 "$pre_trim_file" "$jsonl" "$sid" "$name" "$STATE_FILE" \
-                                "$llm_api_url" "$token" "$MEM_ENABLED" "$MEM_PATH" 2>&1; then
+                                "$llm_api_url" "$LLM_TOKEN" "$MEM_ENABLED" "$MEM_PATH" 2>&1; then
                                 log "$name: LLM extraction complete for $sid"
                                 LLM_EXTRACTIONS_THIS_RUN=$((LLM_EXTRACTIONS_THIS_RUN + 1))
                             else

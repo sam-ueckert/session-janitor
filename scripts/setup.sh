@@ -4,6 +4,7 @@ set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_FILE="$SKILL_DIR/config.json"
+OS="$(uname -s)"
 
 echo "=== Session Janitor Setup ==="
 echo ""
@@ -91,6 +92,25 @@ if ! command -v python3 &>/dev/null; then
 fi
 echo "✓ python3 found"
 
+# --- Check OS-specific watcher dependency ---
+if [[ "$OS" == "Darwin" ]]; then
+    if command -v fswatch &>/dev/null; then
+        echo "✓ fswatch found (per-turn watcher)"
+    else
+        echo "⚠ fswatch not found — per-turn watcher will not work"
+        echo "  Install with: brew install fswatch"
+        echo "  (cron-based trimming every 15 min will still work without it)"
+    fi
+else
+    if command -v inotifywait &>/dev/null; then
+        echo "✓ inotifywait found (per-turn watcher)"
+    else
+        echo "⚠ inotifywait not found — per-turn watcher will not work"
+        echo "  Install with: sudo apt install inotify-tools (or equivalent)"
+        echo "  (cron-based trimming every 15 min will still work without it)"
+    fi
+fi
+
 # --- Generate config ---
 echo ""
 echo "Generating config.json..."
@@ -143,6 +163,7 @@ config = {
     "gateways": gateways,
     "trimMaxKB": 250,
     "keepPairs": 10,
+    "keepFullPairs": 2,
     "archiveRetentionDays": 7,
     "orphanGraceMinutes": 30,
     "staleSubagentHours": 24,
@@ -187,6 +208,46 @@ fi
 echo "  ✓ Cron installed: $CRON_SCHEDULE"
 echo ""
 
+# --- Install watcher service (systemd on Linux, launchd on macOS) ---
+if [[ "$OS" == "Darwin" ]]; then
+    PLIST_TEMPLATE="$SKILL_DIR/session-janitor-watcher.plist"
+    LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
+    PLIST_LABEL="ai.openclaw.session-janitor-watcher"
+    PLIST_DEST="$LAUNCH_AGENTS_DIR/${PLIST_LABEL}.plist"
+
+    if [[ -f "$PLIST_TEMPLATE" ]]; then
+        mkdir -p "$LAUNCH_AGENTS_DIR"
+        sed "s|SKILL_DIR_PLACEHOLDER|$SKILL_DIR|g" "$PLIST_TEMPLATE" > "$PLIST_DEST"
+        launchctl unload "$PLIST_DEST" 2>/dev/null || true
+        launchctl load "$PLIST_DEST" 2>/dev/null && \
+            echo "  ✓ Watcher LaunchAgent installed and started" || \
+            echo "  ⚠ LaunchAgent load failed — check: launchctl list | grep session-janitor"
+        echo "  Location: $PLIST_DEST"
+        echo "  Stop:     launchctl unload \"$PLIST_DEST\""
+        echo "  Start:    launchctl load \"$PLIST_DEST\""
+    else
+        echo "  ⚠ Plist template not found at $PLIST_TEMPLATE — skipping watcher service"
+    fi
+else
+    # Linux — systemd user service
+    SERVICE_TEMPLATE="$SKILL_DIR/session-janitor-watcher.service"
+    SERVICE_DIR="$HOME/.config/systemd/user"
+    SERVICE_DEST="$SERVICE_DIR/session-janitor-watcher.service"
+
+    if [[ -f "$SERVICE_TEMPLATE" ]]; then
+        mkdir -p "$SERVICE_DIR"
+        sed "s|SKILL_DIR_PLACEHOLDER|$SKILL_DIR|g" "$SERVICE_TEMPLATE" > "$SERVICE_DEST"
+        systemctl --user daemon-reload
+        systemctl --user enable --now session-janitor-watcher.service 2>/dev/null && \
+            echo "  ✓ Watcher service enabled and started" || \
+            echo "  ⚠ Watcher service install failed — check: systemctl --user status session-janitor-watcher"
+    else
+        echo "  ⚠ Service template not found at $SERVICE_TEMPLATE — skipping watcher service"
+    fi
+fi
+
+echo ""
+
 # --- Verify ---
 echo "=== Setup Complete ==="
 echo ""
@@ -197,3 +258,10 @@ echo "Schedule:  $CRON_SCHEDULE"
 echo ""
 echo "Test with: bash $JANITOR_SCRIPT"
 echo "Logs:      tail -f $LOG_FILE"
+if [[ "$OS" == "Darwin" ]]; then
+    echo "Watcher:   tail -f /tmp/session-janitor-watcher.log"
+    echo "           launchctl list | grep session-janitor"
+else
+    echo "Watcher:   tail -f /tmp/session-janitor-watcher.log"
+    echo "           systemctl --user status session-janitor-watcher"
+fi

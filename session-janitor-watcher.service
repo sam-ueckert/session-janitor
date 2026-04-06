@@ -1,0 +1,14 @@
+[Unit]
+Description=Session Janitor — inotifywait transcript watcher
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash SKILL_DIR_PLACEHOLDER/scripts/watcher.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/tmp/session-janitor-watcher.log
+StandardError=append:/tmp/session-janitor-watcher.log
+
+[Install]
+WantedBy=default.target

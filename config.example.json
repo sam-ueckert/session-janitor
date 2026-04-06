@@ -10,6 +10,7 @@
   ],
   "trimMaxKB": 250,
   "keepPairs": 10,
+  "keepFullPairs": 2,
   "archiveRetentionDays": 7,
   "orphanGraceMinutes": 30,
   "staleSubagentHours": 24,

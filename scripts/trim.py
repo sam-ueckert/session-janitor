@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Trim an oversized JSONL transcript: keep session header + synthetic compaction + recent exchanges.
 
-Usage: trim.py <jsonl_file> <session_id> <gateway_name> <state_file> [keep_pairs]
+Usage: trim.py <jsonl_file> <session_id> <gateway_name> <state_file> [keep_pairs [keep_full_pairs]]
 
 - Writes a trimmed transcript in-place with:
   - Original session header
   - A synthetic compaction entry summarizing what was archived
   - The last `keep_pairs` user/assistant exchange pairs (default 10)
+  - Full toolResult bodies preserved for the most recent `keep_full_pairs` assistant turns (default 2)
 - Archives the original as .pre-trim.<timestamp>
 
 Exits 0 on success, 1 if nothing to do.
@@ -23,6 +24,7 @@ def main():
     gateway = sys.argv[3]
     state_file = sys.argv[4]
     keep_pairs = int(sys.argv[5]) if len(sys.argv) > 5 else 10
+    keep_full_pairs = int(sys.argv[6]) if len(sys.argv) > 6 else 2
 
     entries = []
     with open(jsonl_file) as f:
@@ -47,16 +49,26 @@ def main():
         sys.exit(1)
 
     message_entries = []
+    tool_result_entries = []
     other_entries = []
     for e in content_entries:
         if e.get("type") == "message":
             role = e.get("message", {}).get("role", "")
             if role in ("user", "assistant"):
                 message_entries.append(e)
+            elif role == "toolResult":
+                tool_result_entries.append(e)
             else:
                 other_entries.append(e)
         else:
             other_entries.append(e)
+
+    # Build a map from toolCallId → entry index in tool_result_entries for fast lookup
+    tool_result_map = {}
+    for e in tool_result_entries:
+        tcid = e.get("message", {}).get("toolCallId")
+        if tcid:
+            tool_result_map[tcid] = e
 
     total_user = sum(1 for e in message_entries if e.get("message", {}).get("role") == "user")
     if total_user < keep_pairs:
@@ -74,6 +86,29 @@ def main():
 
     kept_messages = message_entries[cut_index:]
     archived_messages = message_entries[:cut_index]
+
+    # Identify toolCallIds referenced in kept vs archived messages
+    def get_tool_call_ids(msgs):
+        ids = set()
+        for e in msgs:
+            for b in e.get("message", {}).get("content", []):
+                if b.get("type") == "tool_use" and b.get("id"):
+                    ids.add(b["id"])
+                elif b.get("type") == "toolCall" and b.get("id"):
+                    ids.add(b["id"])
+        return ids
+
+    # Find the most recent N assistant turns (for full tool result preservation)
+    recent_tool_ids = set()
+    asst_count = 0
+    for e in reversed(kept_messages):
+        if e.get("message", {}).get("role") == "assistant":
+            asst_count += 1
+            if asst_count <= keep_full_pairs:
+                recent_tool_ids.update(get_tool_call_ids([e]))
+
+    kept_tool_ids = get_tool_call_ids(kept_messages)
+    archived_tool_ids = get_tool_call_ids(archived_messages)
 
     if len(kept_messages) == 0:
         print(f"Would keep 0 messages — aborting trim")
@@ -119,12 +154,105 @@ def main():
     }
     trimmed.append(compaction_entry)
 
+    def strip_assistant_entry(e):
+        """For non-recent assistant turns: strip thinking blocks entirely,
+        strip arguments from toolCall blocks (keep id + name only)."""
+        import copy
+        e = copy.deepcopy(e)
+        msg = e["message"]
+        new_content = []
+        for b in msg.get("content", []):
+            t = b.get("type", "")
+            if t == "thinking":
+                continue  # Drop entirely
+            elif t == "toolCall":
+                new_content.append({"type": "toolCall", "id": b["id"], "name": b["name"]})
+            else:
+                new_content.append(b)
+        msg["content"] = new_content
+        return e
+
     prev_id = compaction_entry["id"]
     for e in kept_messages:
         e["parentId"] = prev_id
         if "id" not in e: e["id"] = random_id()
         prev_id = e["id"]
+        # Strip thinking + toolCall args from older assistant turns
+        if (e.get("message", {}).get("role") == "assistant" and
+                not get_tool_call_ids([e]).intersection(recent_tool_ids)):
+            e = strip_assistant_entry(e)
         trimmed.append(e)
+
+    def make_turn_summary_entry(asst_entry, results_for_turn, parent_id):
+        """Collapse all toolResults for one assistant turn into a single synthetic entry.
+        Format: 'exec ✓(0): first line | Read ✓(0) | exec ✗(1): error text'
+        """
+        parts = []
+        for r in results_for_turn:
+            msg = r.get("message", {})
+            tool_name = msg.get("toolName", "tool")
+            is_error = msg.get("isError", False)
+            details = msg.get("details", {})
+            exit_code = details.get("exitCode", "?")
+            mark = "\u2713" if not is_error and exit_code in (0, "0", None, "?") else "\u2717"
+            # Get first line of output
+            text = ""
+            for b in msg.get("content", []):
+                if b.get("type") == "text":
+                    text = b["text"].strip()
+                    break
+            first_line = text.splitlines()[0][:100] if text else ""
+            if first_line:
+                parts.append(f"{tool_name} {mark}({exit_code}): {first_line}")
+            else:
+                parts.append(f"{tool_name} {mark}({exit_code})")
+
+        summary_text = " | ".join(parts)
+        asst_id = asst_entry.get("id", random_id())
+        ts = asst_entry.get("timestamp",
+            datetime.now(tz=__import__('datetime').timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+        return {
+            "type": "message",
+            "id": random_id(),
+            "parentId": parent_id,
+            "timestamp": ts,
+            "message": {
+                "role": "toolResult",
+                "toolCallId": f"summary-{asst_id[:8]}",
+                "toolName": "[tool summary]",
+                "content": [{"type": "text", "text": summary_text}],
+                "details": {"summarized": True, "count": len(results_for_turn)},
+            }
+        }
+
+    # Build mapping: toolCallId → toolResult entry
+    tcid_to_result = {}
+    for e in tool_result_entries:
+        tcid = e.get("message", {}).get("toolCallId")
+        if tcid:
+            tcid_to_result[tcid] = e
+
+    # For kept messages, emit toolResults per assistant turn:
+    # - Recent 2 turns: individual entries (full output)
+    # - Older turns: single collapsed summary entry per turn
+    # - Archived turns: dropped
+    for asst_entry in kept_messages:
+        if asst_entry.get("message", {}).get("role") != "assistant":
+            continue
+        turn_ids = get_tool_call_ids([asst_entry])
+        if not turn_ids:
+            continue
+        turn_results = [tcid_to_result[tid] for tid in turn_ids if tid in tcid_to_result]
+        if not turn_results:
+            continue
+        asst_id = asst_entry.get("id", "")
+        if any(tid in recent_tool_ids for tid in turn_ids):
+            # Recent turn: keep full individual entries
+            trimmed.extend(turn_results)
+        else:
+            # Older turn: collapse to single summary entry
+            summary_entry = make_turn_summary_entry(asst_entry, turn_results, asst_entry.get("id", random_id()))
+            trimmed.append(summary_entry)
 
     kept_ids = {e.get("id") for e in kept_messages}
     for e in other_entries:

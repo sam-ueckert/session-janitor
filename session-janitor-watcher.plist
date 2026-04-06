@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.openclaw.session-janitor-watcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>SKILL_DIR_PLACEHOLDER/scripts/watcher.sh</string>
+    </array>
+
+    <!-- Run at login and restart automatically on exit -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Throttle rapid restarts (match systemd RestartSec=10) -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/session-janitor-watcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/session-janitor-watcher.log</string>
+</dict>
+</plist>
