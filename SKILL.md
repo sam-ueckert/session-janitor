@@ -1,3 +1,9 @@
+---
+name: session-janitor
+description: Automated transcript trimming, LLM memory extraction, and session hygiene for OpenClaw gateways. Keeps transcripts from bloating, extracts structured memories before archiving, and prunes stale sessions.
+metadata: {"openclaw": {"requires": {"bins": ["python3", "jq"]}}}
+---
+
 # Session Janitor
 
 Automated transcript and session hygiene for OpenClaw gateways.
@@ -39,14 +45,27 @@ Edit `config.json` after setup to tune thresholds:
 | `trimMaxKB` | 250 | Trim transcripts larger than this |
 | `keepPairs` | 10 | Number of recent user/assistant pairs to keep after trim |
 | `keepFullPairs` | 2 | Most recent N assistant turns that keep full toolResult bodies (older turns are collapsed to summary lines) |
+| `trimFullThresholdPct` | 50 | If the trimmed output still exceeds this % of `trimMaxKB`, all assistant turns are aggressively stripped (tool args removed, thinking dropped). Set to 100 to disable. |
 | `archiveRetentionDays` | 7 | Delete old archives after this many days |
 | `orphanGraceMinutes` | 30 | Wait before archiving orphan transcripts |
 | `staleSubagentHours` | 24 | Prune subagent session entries older than this |
 | `staleCronSessionHours` | 24 | Prune cron session entries older than this |
 | `llmExtraction.enabled` | true | Use LLM to extract memories from trimmed content |
+| `llmExtraction.model` | `openclaw` | Model identifier to use for extraction calls |
+| `llmExtraction.maxInputChars` | 20000 | Max characters of archived content sent to LLM |
+| `llmExtraction.timeoutSecs` | 60 | LLM API call timeout in seconds |
+| `llmExtraction.maxMemories` | 15 | Max memories to accept from a single LLM extraction |
+| `llmExtraction.minArchived` | 3 | Minimum archived messages required before running LLM extraction |
 | `llmExtraction.maxPerRun` | 1 | Max LLM extractions per cron cycle (cost control) |
 | `memCli.enabled` | false | Store extracted memories via `mem` CLI (requires mem) |
 | `cronSchedule` | `*/15 * * * *` | How often to run |
+| `watchdog.enabled` | false | Run hung-session detector after each janitor pass |
+| `watchdog.staleMinutes` | 5 | Session `updatedAt` age threshold to consider stuck |
+| `watchdog.alertSlack` | true | Send Slack DM when a stuck session is detected |
+| `watchdog.slackTarget` | — | Slack user ID or channel to notify |
+| `watchdog.autoRestart` | false | Auto-trigger safe-restart script on detection (use with caution) |
+| `watchdog.restartScriptSlack` | `~/bin/safe-slack-restart.sh` | Safe restart script path for Slack gateway |
+| `watchdog.restartScriptDiscord` | `~/bin/safe-gateway-restart.sh` | Safe restart script path for Discord gateway |
 
 ## Gateway Discovery
 
@@ -100,6 +119,17 @@ tail -f /tmp/session-janitor-watcher.log
 - *Linux* uses `inotifywait` (from `inotify-tools`) and watches via inotify kernel events.
 - *macOS* uses `fswatch` (via Homebrew) and watches via FSEvents.
 
+## Watchdog
+
+The watchdog runs after every janitor pass and checks `updatedAt` on all active sessions. If any session is stale longer than `watchdog.staleMinutes`, it fires a Slack alert. Optional `autoRestart` will trigger the appropriate safe-restart script.
+
+Alert cooldown is 10 minutes per session to prevent spam. State is tracked in the janitor state file.
+
+```bash
+# Run standalone
+bash skills/session-janitor/scripts/watchdog.sh 5 ~/.openclaw/session-janitor-state.json
+```
+
 ## Files
 
 ```
@@ -116,5 +146,6 @@ skills/session-janitor/
     ├── trim.py           # Transcript trimming (thinking, toolCall args, toolResult collapse)
     ├── watcher.sh        # Per-turn trigger (inotifywait on Linux, fswatch on macOS)
     ├── extract-llm.py    # LLM memory extraction
-    └── prune-sessions.py # Stale session pruning
+    ├── prune-sessions.py # Stale session pruning
+    └── watchdog.sh       # Hung-session detector + Slack alert
 ```

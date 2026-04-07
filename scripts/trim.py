@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Trim an oversized JSONL transcript: keep session header + synthetic compaction + recent exchanges.
 
-Usage: trim.py <jsonl_file> <session_id> <gateway_name> <state_file> [keep_pairs [keep_full_pairs]]
+Usage: trim.py <jsonl_file> <session_id> <gateway_name> <state_file> [keep_pairs [keep_full_pairs [min_archive_pairs [trim_full_threshold_pct [trim_max_kb]]]]]
 
 - Writes a trimmed transcript in-place with:
   - Original session header
   - A synthetic compaction entry summarizing what was archived
   - The last `keep_pairs` user/assistant exchange pairs (default 10)
   - Full toolResult bodies preserved for the most recent `keep_full_pairs` assistant turns (default 2)
+- If the retained pairs still exceed `trim_full_threshold_pct`% of `trim_max_kb`, all pairs are
+  further stripped (tool args removed, thinking dropped) to minimize size.
 - Archives the original as .pre-trim.<timestamp>
 
 Exits 0 on success, 1 if nothing to do.
@@ -25,6 +27,9 @@ def main():
     state_file = sys.argv[4]
     keep_pairs = int(sys.argv[5]) if len(sys.argv) > 5 else 10
     keep_full_pairs = int(sys.argv[6]) if len(sys.argv) > 6 else 2
+    min_archive_pairs = int(sys.argv[7]) if len(sys.argv) > 7 else 5  # kept for backward compat; no longer blocks trim
+    trim_full_threshold_pct = float(sys.argv[8]) if len(sys.argv) > 8 else 50.0
+    trim_max_kb = int(sys.argv[9]) if len(sys.argv) > 9 else 250
 
     entries = []
     with open(jsonl_file) as f:
@@ -91,7 +96,12 @@ def main():
     def get_tool_call_ids(msgs):
         ids = set()
         for e in msgs:
-            for b in e.get("message", {}).get("content", []):
+            content = e.get("message", {}).get("content", [])
+            if not isinstance(content, list):
+                continue
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
                 if b.get("type") == "tool_use" and b.get("id"):
                     ids.add(b["id"])
                 elif b.get("type") == "toolCall" and b.get("id"):
@@ -114,9 +124,10 @@ def main():
         print(f"Would keep 0 messages — aborting trim")
         sys.exit(1)
 
-    if len(archived_messages) < 5:
-        print(f"Only {len(archived_messages)} old messages — not worth trimming")
-        sys.exit(1)
+    # Note: min_archive_pairs no longer blocks trim — session always gets trimmed if oversized.
+    # (The check is kept as an informational log only.)
+    if len(archived_messages) < min_archive_pairs:
+        print(f"Only {len(archived_messages)} messages to archive — proceeding with shallow trim")
 
     # Build topic summary for compaction entry
     user_topics = []
@@ -160,8 +171,14 @@ def main():
         import copy
         e = copy.deepcopy(e)
         msg = e["message"]
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            return e  # String content — nothing to strip
         new_content = []
-        for b in msg.get("content", []):
+        for b in content:
+            if not isinstance(b, dict):
+                new_content.append(b)
+                continue
             t = b.get("type", "")
             if t == "thinking":
                 continue  # Drop entirely
@@ -197,10 +214,14 @@ def main():
             mark = "\u2713" if not is_error and exit_code in (0, "0", None, "?") else "\u2717"
             # Get first line of output
             text = ""
-            for b in msg.get("content", []):
-                if b.get("type") == "text":
-                    text = b["text"].strip()
-                    break
+            raw_content = msg.get("content", [])
+            if isinstance(raw_content, str):
+                text = raw_content.strip()
+            else:
+                for b in raw_content:
+                    if isinstance(b, dict) and b.get("type") == "text":
+                        text = b["text"].strip()
+                        break
             first_line = text.splitlines()[0][:100] if text else ""
             if first_line:
                 parts.append(f"{tool_name} {mark}({exit_code}): {first_line}")
@@ -258,6 +279,23 @@ def main():
     for e in other_entries:
         if e.get("parentId") and e["parentId"] in kept_ids:
             trimmed.append(e)
+
+    # Post-trim size check: if the retained pairs alone still exceed trim_full_threshold_pct
+    # of the size limit, strip ALL assistant turns (not just non-recent ones) to minimize size.
+    trimmed_size_kb = sum(len(json.dumps(e)) for e in trimmed) / 1024
+    threshold_kb = trim_max_kb * (trim_full_threshold_pct / 100.0)
+    if trimmed_size_kb > threshold_kb:
+        print(f"Post-trim size {trimmed_size_kb:.0f}KB exceeds {trim_full_threshold_pct:.0f}% of limit "
+              f"({threshold_kb:.0f}KB) — stripping all pairs")
+        stripped_trimmed = []
+        for e in trimmed:
+            if e.get("type") == "message" and e.get("message", {}).get("role") == "assistant":
+                stripped_trimmed.append(strip_assistant_entry(e))
+            else:
+                stripped_trimmed.append(e)
+        trimmed = stripped_trimmed
+        new_size_kb = sum(len(json.dumps(e)) for e in trimmed) / 1024
+        print(f"After full strip: {new_size_kb:.0f}KB")
 
     # Archive original, write trimmed
     archive_path = f"{jsonl_file}.pre-trim.{datetime.now(tz=__import__('datetime').timezone.utc).strftime('%Y-%m-%dT%H-%M-%SZ')}"

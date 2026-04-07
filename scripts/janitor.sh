@@ -24,6 +24,8 @@ vals = {
     'TRIM_MAX_KB': c.get('trimMaxKB', 250),
     'KEEP_PAIRS': c.get('keepPairs', 10),
     'KEEP_FULL_PAIRS': c.get('keepFullPairs', 2),
+    'MIN_ARCHIVE_PAIRS': c.get('minArchivePairs', 5),
+    'TRIM_FULL_THRESHOLD_PCT': c.get('trimFullThresholdPct', 50),
     'ARCHIVE_RETENTION_DAYS': c.get('archiveRetentionDays', 7),
     'ORPHAN_GRACE_MINUTES': c.get('orphanGraceMinutes', 30),
     'STALE_SUBAGENT_HOURS': c.get('staleSubagentHours', 24),
@@ -31,6 +33,11 @@ vals = {
     'LLM_ENABLED': str(c.get('llmExtraction',{}).get('enabled', False)).lower(),
     'LLM_MAX_PER_RUN': c.get('llmExtraction',{}).get('maxPerRun', 1),
     'LLM_GATEWAY': c.get('llmExtraction',{}).get('gateway', ''),
+    'LLM_MODEL': c.get('llmExtraction',{}).get('model', 'openclaw'),
+    'LLM_MAX_INPUT_CHARS': c.get('llmExtraction',{}).get('maxInputChars', 20000),
+    'LLM_TIMEOUT_SECS': c.get('llmExtraction',{}).get('timeoutSecs', 60),
+    'LLM_MAX_MEMORIES': c.get('llmExtraction',{}).get('maxMemories', 15),
+    'LLM_MIN_ARCHIVED': c.get('llmExtraction',{}).get('minArchived', 3),
     'MEM_ENABLED': str(c.get('memCli',{}).get('enabled', False)).lower(),
     'MEM_PATH': c.get('memCli',{}).get('path', 'mem'),
     'STATE_FILE': os.path.expanduser(c.get('stateFile', '~/.openclaw/session-janitor-state.json')),
@@ -120,7 +127,7 @@ for v in d.get('sessions', d).values():
             # ACTIVE session — trim if oversized
             if (( size_kb > TRIM_MAX_KB )); then
                 log "$name: active transcript $sid is ${size_kb}KB — trimming to last $KEEP_PAIRS pairs"
-                if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" 2>&1; then
+                if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" "$MIN_ARCHIVE_PAIRS" "$TRIM_FULL_THRESHOLD_PCT" "$TRIM_MAX_KB" 2>&1; then
                     reset_count=$((reset_count + 1))
 
                     # LLM extraction of archived content
@@ -131,7 +138,9 @@ for v in d.get('sessions', d).values():
                             local llm_api_url="http://127.0.0.1:${LLM_PORT}"
                             if python3 "$SCRIPTS_DIR/extract-llm.py" \
                                 "$pre_trim_file" "$jsonl" "$sid" "$name" "$STATE_FILE" \
-                                "$llm_api_url" "$LLM_TOKEN" "$MEM_ENABLED" "$MEM_PATH" 2>&1; then
+                                "$llm_api_url" "$LLM_TOKEN" "$MEM_ENABLED" "$MEM_PATH" \
+                                "$LLM_MODEL" "$LLM_MAX_INPUT_CHARS" "$LLM_TIMEOUT_SECS" \
+                                "$LLM_MAX_MEMORIES" "$LLM_MIN_ARCHIVED" 2>&1; then
                                 log "$name: LLM extraction complete for $sid"
                                 LLM_EXTRACTIONS_THIS_RUN=$((LLM_EXTRACTIONS_THIS_RUN + 1))
                             else
@@ -201,9 +210,21 @@ for k, v in d.get('sessions', d).items():
     (( changes == 0 )) && log "$name: clean" || true
 }
 
+# --- Watchdog ---
+run_watchdog() {
+    local enabled stale_min
+    enabled=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(str(c.get('watchdog',{}).get('enabled',False)).lower())" 2>/dev/null || echo false)
+    [[ "$enabled" != "true" ]] && return
+    stale_min=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('watchdog',{}).get('staleMinutes',5))" 2>/dev/null || echo 5)
+    log "running watchdog (stale threshold: ${stale_min}min)"
+    bash "$SCRIPTS_DIR/watchdog.sh" "$stale_min" "$STATE_FILE" 2>&1 || log "watchdog exited non-zero"
+}
+
 # --- Main ---
 for (( i=0; i<GATEWAY_COUNT; i++ )); do
     process_gateway "$i"
 done
+
+run_watchdog
 
 log "Done"

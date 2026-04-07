@@ -9,10 +9,13 @@ Exit 0 = success/skip, 2 = LLM failure (caller should fall back).
 import json, sys, os, subprocess, fcntl, signal
 from datetime import datetime
 
-MAX_INPUT_CHARS = 20000
-API_TIMEOUT_SECS = 60
+# Defaults — overridden by config values passed via argv
+DEFAULT_MAX_INPUT_CHARS = 20000
+DEFAULT_API_TIMEOUT_SECS = 60
+DEFAULT_MAX_MEMORIES = 15
+DEFAULT_MIN_ARCHIVED = 3
 LOCKFILE = "/tmp/session-janitor-extract.lock"
-MODEL = "openclaw"
+DEFAULT_MODEL = "openclaw"
 
 EXTRACTION_PROMPT = """You are a memory extraction system. Analyze this conversation transcript and extract structured memories.
 
@@ -71,22 +74,22 @@ def extract_archived_content(pre_trim_file, trimmed_file):
         archived.append({"role": role, "content": content})
     return archived
 
-def format_for_llm(archived_messages):
+def format_for_llm(archived_messages, max_input_chars=DEFAULT_MAX_INPUT_CHARS):
     lines = []
     for msg in archived_messages:
         role = "User" if msg["role"] == "user" else "Assistant"
         lines.append(f"[{role}]: {msg['content']}\n")
     text = "".join(lines)
-    if len(text) > MAX_INPUT_CHARS:
-        head = int(MAX_INPUT_CHARS * 0.3)
-        tail = MAX_INPUT_CHARS - head - 50
+    if len(text) > max_input_chars:
+        head = int(max_input_chars * 0.3)
+        tail = max_input_chars - head - 50
         text = text[:head] + "\n[... middle truncated ...]\n" + text[-tail:]
     return text
 
-def call_llm(api_url, api_token, transcript_text):
+def call_llm(api_url, api_token, transcript_text, model=DEFAULT_MODEL, api_timeout_secs=DEFAULT_API_TIMEOUT_SECS):
     import urllib.request
     payload = {
-        "model": MODEL, "max_tokens": 2000, "temperature": 0.3,
+        "model": model, "max_tokens": 2000, "temperature": 0.3,
         "messages": [{"role": "user", "content": EXTRACTION_PROMPT + transcript_text}]
     }
     req = urllib.request.Request(
@@ -95,9 +98,9 @@ def call_llm(api_url, api_token, transcript_text):
         headers={"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
     )
     signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(API_TIMEOUT_SECS)
+    signal.alarm(api_timeout_secs)
     try:
-        with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECS) as resp:
+        with urllib.request.urlopen(req, timeout=api_timeout_secs) as resp:
             result = json.loads(resp.read())
         signal.alarm(0)
         return result["choices"][0]["message"]["content"]
@@ -105,7 +108,7 @@ def call_llm(api_url, api_token, transcript_text):
         signal.alarm(0)
         raise RuntimeError(f"LLM API call failed: {e}")
 
-def parse_memories(llm_output):
+def parse_memories(llm_output, max_memories=DEFAULT_MAX_MEMORIES):
     memories = []
     for line in llm_output.strip().split("\n"):
         line = line.strip()
@@ -118,7 +121,7 @@ def parse_memories(llm_output):
             if len(mem["content"]) < 5 or len(mem["content"]) > 500: continue
             memories.append(mem)
         except: continue
-    return memories[:15]
+    return memories[:max_memories]
 
 def store_memories(memories, mem_enabled, mem_path):
     if not mem_enabled: return 0
@@ -144,6 +147,11 @@ def main():
     state_file, api_url, api_token = sys.argv[5:8]
     mem_enabled = sys.argv[8].lower() == "true" if len(sys.argv) > 8 else False
     mem_path = sys.argv[9] if len(sys.argv) > 9 else "mem"
+    model = sys.argv[10] if len(sys.argv) > 10 else DEFAULT_MODEL
+    max_input_chars = int(sys.argv[11]) if len(sys.argv) > 11 else DEFAULT_MAX_INPUT_CHARS
+    api_timeout_secs = int(sys.argv[12]) if len(sys.argv) > 12 else DEFAULT_API_TIMEOUT_SECS
+    max_memories = int(sys.argv[13]) if len(sys.argv) > 13 else DEFAULT_MAX_MEMORIES
+    min_archived = int(sys.argv[14]) if len(sys.argv) > 14 else DEFAULT_MIN_ARCHIVED
 
     # Lockfile
     lock_fd = None
@@ -170,20 +178,20 @@ def main():
             sys.exit(1)
 
         archived = extract_archived_content(pre_trim_file, trimmed_file)
-        if len(archived) < 3:
-            print(f"Only {len(archived)} archived messages — not enough")
+        if len(archived) < min_archived:
+            print(f"Only {len(archived)} archived messages (need {min_archived}) — not enough")
             sys.exit(0)
 
-        transcript_text = format_for_llm(archived)
+        transcript_text = format_for_llm(archived, max_input_chars)
         print(f"Sending {len(transcript_text)} chars ({len(archived)} messages) to LLM...")
 
         try:
-            llm_output = call_llm(api_url, api_token, transcript_text)
+            llm_output = call_llm(api_url, api_token, transcript_text, model, api_timeout_secs)
         except Exception as e:
             print(f"LLM extraction failed: {e}", file=sys.stderr)
             sys.exit(2)
 
-        memories = parse_memories(llm_output)
+        memories = parse_memories(llm_output, max_memories)
         if not memories:
             print("LLM returned no valid memories")
             sys.exit(0)

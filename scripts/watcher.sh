@@ -34,8 +34,10 @@ print(c.get('$1', '$2'))
 TRIM_MAX_KB=$(read_config_val trimMaxKB 250)
 KEEP_PAIRS=$(read_config_val keepPairs 10)
 KEEP_FULL_PAIRS=$(read_config_val keepFullPairs 2)
+MIN_ARCHIVE_PAIRS=$(read_config_val minArchivePairs 5)
+TRIM_FULL_THRESHOLD_PCT=$(read_config_val trimFullThresholdPct 50)
+DEBOUNCE_SECS=$(read_config_val watcherDebounceSecs 3)
 STATE_FILE=$(python3 -c "import json,os; c=json.load(open('$CONFIG_FILE')); print(os.path.expanduser(c.get('stateFile','~/.openclaw/session-janitor-state.json')))")
-DEBOUNCE_SECS=3
 
 # Build list of watch dirs + gateway metadata
 get_gateways() {
@@ -126,7 +128,7 @@ sys.exit(0 if '$sid' in active else 1)
 
     log "$name: $sid is ${size_kb}KB — trimming"
 
-    if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" 2>&1; then
+    if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" "$MIN_ARCHIVE_PAIRS" "$TRIM_FULL_THRESHOLD_PCT" "$TRIM_MAX_KB" 2>&1; then
         log "$name: trim complete for $sid"
 
         # Ping gateway to reload

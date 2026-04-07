@@ -8,9 +8,24 @@
       "token": ""
     }
   ],
+  // Trim a session transcript when it exceeds this size (KB)
   "trimMaxKB": 250,
+
+  // Number of recent user/assistant exchange pairs to retain after trimming
   "keepPairs": 10,
+
+  // Most recent N assistant turns that keep full toolResult bodies.
+  // Older turns have tool args stripped and thinking blocks removed to save space.
   "keepFullPairs": 2,
+
+  // Informational only — no longer blocks trim. Sessions exceeding trimMaxKB are always trimmed.
+  "minArchivePairs": 5,
+
+  // If the trimmed transcript (header + compaction + retained pairs) still exceeds this
+  // percentage of trimMaxKB, all assistant turns are aggressively stripped (tool args removed,
+  // thinking dropped) to bring the size down further. Applies when a session has very large
+  // tool outputs in its recent pairs. Set to 100 to disable aggressive stripping.
+  "trimFullThresholdPct": 50,
   "archiveRetentionDays": 7,
   "orphanGraceMinutes": 30,
   "staleSubagentHours": 24,
@@ -18,14 +33,34 @@
   "llmExtraction": {
     "enabled": true,
     "maxPerRun": 1,
+    "model": "openclaw",
     "maxInputChars": 20000,
-    "timeoutSecs": 60
+    "timeoutSecs": 60,
+    "maxMemories": 15,
+    "minArchived": 3
   },
+  // Seconds to wait after a file-change event before firing a trim (watcher mode only).
+  // Debounce prevents redundant trims during rapid sequential writes.
+  "watcherDebounceSecs": 3,
   "memCli": {
     "enabled": false,
     "path": "mem"
   },
   "stateFile": "~/.openclaw/session-janitor-state.json",
   "cronSchedule": "*/15 * * * *",
-  "logFile": "/tmp/session-janitor.log"
+  "logFile": "/tmp/session-janitor.log",
+  // Watchdog: detects sessions stuck longer than staleMinutes and optionally restarts the gateway.
+  // alertSlack: send a Slack DM when a stuck session is detected.
+  // slackTarget: Slack user ID or channel to notify.
+  // autoRestart: if true, automatically trigger the safe restart script (USE WITH CAUTION).
+  // restartScriptSlack/Discord: path to safe-restart scripts (defaults shown).
+  "watchdog": {
+    "enabled": false,
+    "staleMinutes": 5,
+    "alertSlack": true,
+    "slackTarget": "U0AM4BLBUUW",
+    "autoRestart": false,
+    "restartScriptSlack": "~/bin/safe-slack-restart.sh",
+    "restartScriptDiscord": "~/bin/safe-gateway-restart.sh"
+  }
 }

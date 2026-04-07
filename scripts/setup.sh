@@ -164,6 +164,8 @@ config = {
     "trimMaxKB": 250,
     "keepPairs": 10,
     "keepFullPairs": 2,
+    "minArchivePairs": 5,
+    "trimFullThresholdPct": 50,
     "archiveRetentionDays": 7,
     "orphanGraceMinutes": 30,
     "staleSubagentHours": 24,
@@ -171,14 +173,18 @@ config = {
     "llmExtraction": {
         "enabled": True,
         "maxPerRun": 1,
+        "model": "openclaw",
         "maxInputChars": 20000,
         "timeoutSecs": 60,
+        "maxMemories": 15,
+        "minArchived": 3,
     },
     "memCli": {
         "enabled": bool(mem_path),
         "path": mem_path,
     },
     "stateFile": os.path.expanduser("~/.openclaw/session-janitor-state.json"),
+    "watcherDebounceSecs": 3,
     "cronSchedule": "*/15 * * * *",
     "logFile": "/tmp/session-janitor.log",
 }
