@@ -154,26 +154,14 @@ for v in d.get('sessions', d).values():
                         fi
                     fi
 
-                    # Notify the gateway to reload the trimmed transcript
-                    if [[ -n "$token" ]]; then
-                        local session_key
-                        session_key=$(python3 -c "
-import json
-d = json.load(open('$sessions_json'))
-for k, v in d.get('sessions', d).items():
-    if v.get('sessionId','') == '$sid':
-        print(k)
-        break
-" 2>/dev/null)
-                        if [[ -n "$session_key" ]]; then
-                            curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
-                                -H "Authorization: Bearer $token" \
-                                -H "Content-Type: application/json" \
-                                -H "x-openclaw-session-key: $session_key" \
-                                -d '{"model":"openclaw","messages":[{"role":"user","content":"[session trimmed by maintenance — acknowledge with NO_REPLY]"}]}' \
-                                >/dev/null 2>&1 || true
-                        fi
-                    fi
+                    # Reset the session JSONL so the gateway starts fresh on next message.
+                    # Avoids broken-transcript state caused by curl-triggered LLM tool use
+                    # getting interrupted mid-execution. LLM extraction above already archived
+                    # the important context into mem.
+                    local reset_ts
+                    reset_ts=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+                    mv "$jsonl" "${jsonl}.reset.${reset_ts}" 2>/dev/null || true
+                    log "$name: session $sid reset after trim (clean slate for next message)"
                 else
                     log "$name: trim failed for $sid"
                 fi
