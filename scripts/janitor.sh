@@ -161,6 +161,19 @@ for v in d.get('sessions', d).values():
                     local reset_ts
                     reset_ts=$(date -u +%Y-%m-%dT%H-%M-%SZ)
                     mv "$jsonl" "${jsonl}.reset.${reset_ts}" 2>/dev/null || true
+
+                    # Remove the session entry from sessions.json so the gateway doesn't
+                    # hold a dangling pointer to the renamed file.
+                    python3 -c "
+import json, sys
+path = '$sessions_json'
+sid = '$sid'
+d = json.load(open(path))
+sessions = d.get('sessions', d)
+to_del = [k for k, v in sessions.items() if v.get('sessionId') == sid]
+for k in to_del: del sessions[k]
+if to_del: json.dump(d, open(path, 'w'), indent=2)
+" 2>/dev/null || true
                     log "$name: session $sid reset after trim (clean slate for next message)"
                 else
                     log "$name: trim failed for $sid"
