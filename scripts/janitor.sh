@@ -154,6 +154,27 @@ for v in d.get('sessions', d).values():
                         fi
                     fi
 
+                    # Clear compaction checkpoints from session entry to prevent blob accumulation.
+                    # These store large summaries that grow with each auto-compaction cycle.
+                    python3 -c "
+import json
+path = '$sessions_json'
+sid = '$sid'
+d = json.load(open(path))
+sessions = d.get('sessions', d)
+changed = False
+for k, v in sessions.items():
+    if v.get('sessionId') == sid:
+        if 'compactionCheckpoints' in v:
+            del v['compactionCheckpoints']
+            changed = True
+        if 'modelOverride' in v:
+            del v['modelOverride']
+            changed = True
+if changed:
+    json.dump(d, open(path, 'w'), indent=2)
+" 2>/dev/null && log "$name: cleared compaction checkpoints for $sid" || true
+
                     # Reset the session JSONL so the gateway starts fresh on next message.
                     # Avoids broken-transcript state caused by curl-triggered LLM tool use
                     # getting interrupted mid-execution. LLM extraction above already archived
@@ -191,6 +212,24 @@ if to_del: json.dump(d, open(path, 'w'), indent=2)
         fi
     done
     shopt -u nullglob
+
+    # --- Prune compaction checkpoints from all active sessions ---
+    local checkpoint_pruned
+    checkpoint_pruned=$(python3 -c "
+import json
+path = '$sessions_json'
+d = json.load(open(path))
+sessions = d.get('sessions', d)
+count = 0
+for k, v in sessions.items():
+    if 'compactionCheckpoints' in v:
+        del v['compactionCheckpoints']
+        count += 1
+if count:
+    json.dump(d, open(path, 'w'), indent=2)
+print(count)
+" 2>/dev/null || echo 0)
+    (( checkpoint_pruned > 0 )) && log "$name: pruned compaction checkpoints from $checkpoint_pruned session(s)"
 
     # --- Prune stale session entries ---
     local pruned_count
