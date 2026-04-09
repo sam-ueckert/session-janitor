@@ -21,10 +21,11 @@
   // Informational only — no longer blocks trim. Sessions exceeding trimMaxKB are always trimmed.
   "minArchivePairs": 5,
 
-  // If the trimmed transcript (header + compaction + retained pairs) still exceeds this
-  // percentage of trimMaxKB, all assistant turns are aggressively stripped (tool args removed,
-  // thinking dropped) to bring the size down further. Applies when a session has very large
-  // tool outputs in its recent pairs. Set to 100 to disable aggressive stripping.
+  // Two-stage aggressive reduction when trimmed transcript still exceeds this % of trimMaxKB:
+  //   Stage 1: strip all assistant turns (tool args + thinking removed)
+  //   Stage 2: if still over threshold, drop ALL toolResult entries entirely
+  // Handles sessions with massive tool output but few user turns (e.g. stuck-loop sessions).
+  // Set to 100 to disable.
   "trimFullThresholdPct": 50,
   "archiveRetentionDays": 7,
   "orphanGraceMinutes": 30,

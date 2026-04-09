@@ -47,9 +47,19 @@ exec ✓(0): first line of output | Read ✓(0) | exec ✗(1): error text
 ### What's Preserved
 
 - **Session header** — always kept (required by gateway)
-- **Last N user/assistant pairs** (default: 10) — kept verbatim
-- **Recent 2 assistant turns** — full toolResult entries preserved
+- **Last N user/assistant pairs** (default: 10, configurable via `keepPairs`) — kept verbatim. Trim fires unconditionally when over threshold — if fewer than `keepPairs` exist, all are kept.
+- **Recent 2 assistant turns** — full toolResult entries preserved (configurable via `keepFullPairs`)
 - **Synthetic compaction entry** — describes what was archived and why
+
+### Two-Stage Aggressive Reduction
+
+If the trimmed transcript still exceeds `trimFullThresholdPct`% of `trimMaxKB` (default: 50%), a second pass fires:
+
+**Stage 1 — Strip all assistant turns:** thinking blocks and toolCall arguments dropped from every assistant entry (not just older ones).
+
+**Stage 2 — Drop all toolResult entries:** if still over threshold after Stage 1, every `toolResult` entry is removed entirely. Only the session header, compaction stub, and raw user/assistant message text remain.
+
+This handles sessions with very few user messages but massive tool output accumulation (e.g. stuck-loop sessions that generate hundreds of KB of tool results with only 3-4 user turns).
 
 ### Size Reduction Examples
 

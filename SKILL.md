@@ -1,5 +1,5 @@
 ---
-name: session-janitor
+name: janitor
 description: Automated transcript trimming, LLM memory extraction, and session hygiene for OpenClaw gateways. Keeps transcripts from bloating, extracts structured memories before archiving, and prunes stale sessions.
 metadata: {"openclaw": {"requires": {"bins": ["python3", "jq"]}}}
 ---
@@ -42,10 +42,11 @@ Edit `config.json` after setup to tune thresholds:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `trimMaxKB` | 250 | Trim transcripts larger than this |
-| `keepPairs` | 10 | Number of recent user/assistant pairs to keep after trim |
+| `trimMaxKB` | 250 | Trim transcripts larger than this. Trim always fires when exceeded — there is no minimum pair count. |
+| `keepPairs` | 10 | Number of recent user/assistant pairs to keep after trim. If fewer pairs exist than this, all are kept (no skip). |
 | `keepFullPairs` | 2 | Most recent N assistant turns that keep full toolResult bodies (older turns are collapsed to summary lines) |
-| `trimFullThresholdPct` | 50 | If the trimmed output still exceeds this % of `trimMaxKB`, all assistant turns are aggressively stripped (tool args removed, thinking dropped). Set to 100 to disable. |
+| `minArchivePairs` | 5 | Informational only — no longer blocks trim. Sessions exceeding `trimMaxKB` are always trimmed. |
+| `trimFullThresholdPct` | 50 | Two-stage aggressive reduction when trimmed output still exceeds this % of `trimMaxKB`: (1) strip all assistant turns (tool args + thinking removed); (2) if still over threshold, drop all toolResult entries entirely. Set to 100 to disable. |
 | `archiveRetentionDays` | 7 | Delete old archives after this many days |
 | `orphanGraceMinutes` | 30 | Wait before archiving orphan transcripts |
 | `staleSubagentHours` | 24 | Prune subagent session entries older than this |
