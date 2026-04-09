@@ -1,0 +1,65 @@
+{
+  "gateways": [
+    {
+      "name": "default",
+      "configDir": "/home/swabby/.openclaw",
+      "sessionsDir": "/home/swabby/.openclaw/agents/main/sessions",
+      "port": 18789,
+      "token": "aee524da0214f9a1616e00c1d769eba03721c9c7e79133cd"
+    },
+    {
+      "name": "discord",
+      "configDir": "/home/swabby/.openclaw-discord",
+      "sessionsDir": "/home/swabby/.openclaw-discord/agents/main/sessions",
+      "port": 18790,
+      "token": "3dd1963527ee7d35629cccc5b6d3d1c21ccb3c31e33f159a"
+    },
+    {
+      "name": "slack",
+      "configDir": "/home/swabby/.openclaw-slack",
+      "sessionsDir": "/home/swabby/.openclaw-slack/agents/main/sessions",
+      "port": 18789,
+      "token": "aee524da0214f9a1616e00c1d769eba03721c9c7e79133cd"
+    },
+    {
+      "name": "test",
+      "configDir": "/home/swabby/.openclaw-test",
+      "sessionsDir": "/home/swabby/.openclaw-test/agents/main/sessions",
+      "port": 18795,
+      "token": "49c41c869ceaf39f6b0345b5ec89cf578bc9d06a90fd7b4a"
+    }
+  ],
+  "trimMaxKB": 250,
+  "keepPairs": 10,
+  "keepFullPairs": 2,
+  "minArchivePairs": 5,
+  "trimFullThresholdPct": 50,
+  "archiveRetentionDays": 7,
+  "orphanGraceMinutes": 30,
+  "staleSubagentHours": 24,
+  "staleCronSessionHours": 24,
+  "llmExtraction": {
+    "enabled": true,
+    "maxPerRun": 1,
+    "model": "openclaw",
+    "maxInputChars": 20000,
+    "timeoutSecs": 60,
+    "maxMemories": 15,
+    "minArchived": 3
+  },
+  "memCli": {
+    "enabled": true,
+    "path": "/home/swabby/bin/mem"
+  },
+  "stateFile": "/home/swabby/.openclaw/session-janitor-state.json",
+  "sidecar": {
+    "enabled": true,
+    "minEntryBytes": 5120
+  },
+  "watcherDebounceSecs": 3,
+  "watchdog": {
+    "enabled": false
+  },
+  "cronSchedule": "disabled",
+  "logFile": "/tmp/session-janitor.log"
+}

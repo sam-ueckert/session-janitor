@@ -38,6 +38,8 @@ MIN_ARCHIVE_PAIRS=$(read_config_val minArchivePairs 5)
 TRIM_FULL_THRESHOLD_PCT=$(read_config_val trimFullThresholdPct 50)
 DEBOUNCE_SECS=$(read_config_val watcherDebounceSecs 3)
 STATE_FILE=$(python3 -c "import json,os; c=json.load(open('$CONFIG_FILE')); print(os.path.expanduser(c.get('stateFile','~/.openclaw/session-janitor-state.json')))")
+SIDECAR_ENABLED=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(str(c.get('sidecar',{}).get('enabled',True)).lower())")
+SIDECAR_MIN_BYTES=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('sidecar',{}).get('minEntryBytes',5120))")
 
 # Build list of watch dirs + gateway metadata
 get_gateways() {
@@ -127,6 +129,41 @@ sys.exit(0 if '$sid' in active else 1)
     fi
 
     log "$name: $sid is ${size_kb}KB — trimming"
+
+    # Run sidecar offloader first (before trim so trim sees smaller file)
+    if [[ "$SIDECAR_ENABLED" == "true" ]]; then
+        if python3 "$SCRIPTS_DIR/sidecar.py" "$jsonl" "$sid" "$SIDECAR_MIN_BYTES" 2>&1 | while IFS= read -r line; do log "$name: [sidecar] $line"; done; then
+            : # sidecar ran (even if nothing was offloaded, exit 0)
+        else
+            log "$name: sidecar failed for $sid (exit $?) — continuing to trim"
+        fi
+        # Recheck size after sidecar (it may have shrunk the file below threshold)
+        size_kb=$(get_file_size_kb "$jsonl")
+        if (( size_kb <= TRIM_MAX_KB )); then
+            log "$name: $sid shrank to ${size_kb}KB after sidecar — skipping trim"
+            # Still ping gateway so it reloads the updated transcript
+            if [[ -n "$token" && -n "$port" && -n "$sessions_json" ]]; then
+                local session_key
+                session_key=$(python3 -c "
+import json
+d = json.load(open('$sessions_json'))
+for k, v in d.get('sessions', d).items():
+    if v.get('sessionId','') == '$sid':
+        print(k)
+        break
+" 2>/dev/null)
+                if [[ -n "$session_key" ]]; then
+                    curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
+                        -H "Authorization: Bearer $token" \
+                        -H "Content-Type: application/json" \
+                        -H "x-openclaw-session-key: $session_key" \
+                        -d '{"model":"openclaw","messages":[{"role":"user","content":"[tool outputs sidecared — acknowledge with NO_REPLY]"}]}' \
+                        >/dev/null 2>&1 && log "$name: gateway reload pinged after sidecar for $session_key" || true
+                fi
+            fi
+            return
+        fi
+    fi
 
     if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" "$MIN_ARCHIVE_PAIRS" "$TRIM_FULL_THRESHOLD_PCT" "$TRIM_MAX_KB" 2>&1; then
         log "$name: trim complete for $sid"
