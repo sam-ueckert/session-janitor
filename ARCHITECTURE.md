@@ -4,9 +4,10 @@
 
 Session Janitor is a transcript hygiene system for OpenClaw gateways. It reduces context token usage by aggressively trimming JSONL session files while preserving enough history for the agent to remain coherent.
 
-Two complementary triggers:
+Three complementary mechanisms:
+- **Sidecar (sidecar.py)** — offloads large tool outputs to `.toolcache/` files on every turn
+- **Watcher (watcher.sh)** — `inotifywait` fires sidecar + trim within ~3 seconds of any turn completing
 - **Cron (janitor.sh)** — runs every 15 minutes as a sweep across all sessions
-- **Watcher (watcher.sh)** — `inotifywait` fires trim within ~3 seconds of any turn completing
 
 ---
 
@@ -87,7 +88,37 @@ Before trimming, sessions routinely exceeded 80k tokens, triggering gateway comp
 
 ---
 
-## The Two Triggers
+## Sidecar Offloader
+
+`sidecar.py` runs on every watcher-triggered write, *before* trim. It targets `toolResult` entries that exceed a size threshold (default 5KB).
+
+### How It Works
+
+1. Scan the JSONL for `toolResult` entries ≥ `sidecar.minEntryBytes`
+2. Write the full content to `<session-id>.toolcache/<tool-call-id>.txt` (adjacent to the transcript)
+3. Replace the inline content with a stub:
+   ```
+   [tool output offloaded to .toolcache/<tool-call-id>.txt — <N> bytes. Use the Read tool to access it if needed.]
+   ```
+4. If the file shrinks below the trim threshold after sidecar, skip trim entirely (and ping the gateway to reload)
+
+### Properties
+
+- **Idempotent** — already-stubbed entries are skipped on subsequent runs
+- **Restart-safe** — `.toolcache/` files live alongside the transcript; no temp files or external state
+- **Selective** — only `toolResult` entries are offloaded; user/assistant messages and thinking blocks are untouched
+- **Agent-friendly** — stubs tell the agent where to find the original content if needed
+
+### Configuration
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `sidecar.enabled` | true | Enable/disable the sidecar offloader |
+| `sidecar.minEntryBytes` | 5120 | Minimum toolResult content size to trigger offload |
+
+---
+
+## The Three Triggers
 
 ### Cron (every 15 min)
 
@@ -108,10 +139,11 @@ Flow per JSONL write event:
 1. JSONL file closes after a turn completes
 2. inotifywait/fswatch emits the event
 3. 3-second debounce (waits for follow-on writes to finish)
-4. Check file size — if over threshold (150KB), proceed
-5. Verify it's an active session (check sessions.json)
-6. Run `trim.py` in background
-7. Ping gateway via Chat Completions API with `x-openclaw-session-key` to force in-memory reload
+4. **Run sidecar offloader** — extracts large toolResult bodies to `.toolcache/` files
+5. Recheck file size — if sidecar alone brought it below threshold, skip trim and ping gateway
+6. If still over threshold, verify it's an active session (check sessions.json)
+7. Run `trim.py` in background
+8. Ping gateway via Chat Completions API with `x-openclaw-session-key` to force in-memory reload
 
 The reload ping is critical — without it the gateway keeps its old in-memory context until the next session load.
 
@@ -144,12 +176,29 @@ skills/session-janitor/
 ├── config.example.json               # Reference config
 ├── session-janitor-watcher.service   # Systemd user service template
 └── scripts/
-    ├── setup.sh          # Gateway discovery, config gen, cron + service install
-    ├── janitor.sh        # Cron entry point (trim + extract + prune)
-    ├── trim.py           # Core transcript trimming logic
-    ├── extract-llm.py    # LLM memory extraction from archived content
-    ├── prune-sessions.py # Stale subagent/cron session pruning
-    └── watcher.sh        # inotifywait per-turn trigger
+    ├── setup.sh           # Gateway discovery, config gen, cron + service install
+    ├── janitor.sh         # Cron entry point (trim + extract + prune)
+    ├── trim.py            # Core transcript trimming logic
+    ├── sidecar.py         # Large toolResult offloader (→ .toolcache/ files)
+    ├── extract-llm.py     # LLM memory extraction from archived content
+    ├── prune-sessions.py  # Stale subagent/cron session pruning
+    ├── watcher.sh         # inotifywait per-turn trigger (sidecar + trim)
+    ├── test-sidecar.py    # Sidecar test suite (8 scenarios, 22 assertions)
+    └── test-sidecar.sh    # Shell wrapper for sidecar tests
+```
+
+### Runtime File Layout
+
+For each session with offloaded tool outputs:
+```
+~/.openclaw-*/agents/main/sessions/
+├── <session-id>.jsonl                # Transcript (stubs reference .toolcache/)
+├── <session-id>.toolcache/            # Offloaded tool outputs
+│   ├── <tool-call-id-1>.txt
+│   ├── <tool-call-id-2>.txt
+│   └── ...
+├── <session-id>.jsonl.pre-trim.<ts>   # Pre-trim archive (if trimmed)
+└── ...
 ```
 
 ---

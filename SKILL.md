@@ -10,6 +10,7 @@ Automated transcript and session hygiene for OpenClaw gateways.
 
 ## What It Does
 
+- **Sidecar offloader** — extracts large tool outputs (≥5KB) to `.toolcache/` files, replacing inline content with lightweight stubs. Runs before trim on every turn.
 - **Trims oversized transcripts** — keeps recent exchanges + synthetic compaction summary, archives the rest
 - **LLM memory extraction** — uses the gateway's chat completions API to extract structured memories (facts, decisions, lessons) from trimmed content before discarding
 - **Prunes stale sessions** — removes old subagent/cron session entries from sessions.json
@@ -60,6 +61,8 @@ Edit `config.json` after setup to tune thresholds:
 | `llmExtraction.maxPerRun` | 1 | Max LLM extractions per cron cycle (cost control) |
 | `memCli.enabled` | false | Store extracted memories via `mem` CLI (requires mem) |
 | `cronSchedule` | `*/15 * * * *` | How often to run |
+| `sidecar.enabled` | true | Offload large toolResult entries to `.toolcache/` files |
+| `sidecar.minEntryBytes` | 5120 | Minimum toolResult content size (bytes) to trigger offload |
 | `watchdog.enabled` | false | Run hung-session detector after each janitor pass |
 | `watchdog.staleMinutes` | 5 | Session `updatedAt` age threshold to consider stuck |
 | `watchdog.alertSlack` | true | Send Slack DM when a stuck session is detected |
@@ -142,11 +145,14 @@ skills/session-janitor/
 ├── session-janitor-watcher.service       # Linux: systemd user service template
 ├── session-janitor-watcher.plist         # macOS: launchd LaunchAgent template
 └── scripts/
-    ├── setup.sh          # Discovery + config gen + cron + service install (Linux + macOS)
-    ├── janitor.sh        # Main cron entry point
-    ├── trim.py           # Transcript trimming (thinking, toolCall args, toolResult collapse)
-    ├── watcher.sh        # Per-turn trigger (inotifywait on Linux, fswatch on macOS)
-    ├── extract-llm.py    # LLM memory extraction
-    ├── prune-sessions.py # Stale session pruning
-    └── watchdog.sh       # Hung-session detector + Slack alert
+    ├── setup.sh           # Discovery + config gen + cron + service install (Linux + macOS)
+    ├── janitor.sh         # Main cron entry point
+    ├── trim.py            # Transcript trimming (thinking, toolCall args, toolResult collapse)
+    ├── sidecar.py         # Large toolResult offloader (→ .toolcache/ files)
+    ├── watcher.sh         # Per-turn trigger (sidecar + trim; inotifywait/fswatch)
+    ├── extract-llm.py     # LLM memory extraction
+    ├── prune-sessions.py  # Stale session pruning
+    ├── watchdog.sh        # Hung-session detector + Slack alert
+    ├── test-sidecar.py    # Sidecar test suite (8 scenarios, 22 assertions)
+    └── test-sidecar.sh    # Shell wrapper for sidecar tests
 ```
