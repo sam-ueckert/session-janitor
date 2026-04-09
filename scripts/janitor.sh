@@ -124,7 +124,28 @@ for v in d.get('sessions', d).values():
         size_kb=$(( $(stat -c%s "$jsonl" 2>/dev/null || echo 0) / 1024 ))
 
         if echo "$active_sids" | grep -qF "$sid"; then
-            # ACTIVE session — trim if oversized
+            # ACTIVE session — always clear modelOverride + compactionCheckpoints regardless of size
+            python3 -c "
+import json
+path = '$sessions_json'
+sid = '$sid'
+d = json.load(open(path))
+sessions = d.get('sessions', d)
+changed = False
+for k, v in sessions.items():
+    if v.get('sessionId') == sid:
+        if 'compactionCheckpoints' in v:
+            del v['compactionCheckpoints']
+            changed = True
+        if 'modelOverride' in v:
+            del v['modelOverride']
+            changed = True
+if changed:
+    json.dump(d, open(path, 'w'), indent=2)
+    print('cleared')
+" 2>/dev/null | grep -q cleared && log "$name: cleared modelOverride/compactionCheckpoints for $sid" || true
+
+            # Trim if oversized
             if (( size_kb > TRIM_MAX_KB )); then
                 log "$name: active transcript $sid is ${size_kb}KB — trimming to last $KEEP_PAIRS pairs"
                 if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" "$MIN_ARCHIVE_PAIRS" "$TRIM_FULL_THRESHOLD_PCT" "$TRIM_MAX_KB" 2>&1; then
@@ -153,27 +174,6 @@ for v in d.get('sessions', d).values():
                             fi
                         fi
                     fi
-
-                    # Clear compaction checkpoints from session entry to prevent blob accumulation.
-                    # These store large summaries that grow with each auto-compaction cycle.
-                    python3 -c "
-import json
-path = '$sessions_json'
-sid = '$sid'
-d = json.load(open(path))
-sessions = d.get('sessions', d)
-changed = False
-for k, v in sessions.items():
-    if v.get('sessionId') == sid:
-        if 'compactionCheckpoints' in v:
-            del v['compactionCheckpoints']
-            changed = True
-        if 'modelOverride' in v:
-            del v['modelOverride']
-            changed = True
-if changed:
-    json.dump(d, open(path, 'w'), indent=2)
-" 2>/dev/null && log "$name: cleared compaction checkpoints for $sid" || true
 
                     # Reset the session JSONL so the gateway starts fresh on next message.
                     # Avoids broken-transcript state caused by curl-triggered LLM tool use
