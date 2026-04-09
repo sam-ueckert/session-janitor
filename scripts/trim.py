@@ -77,17 +77,18 @@ def main():
 
     total_user = sum(1 for e in message_entries if e.get("message", {}).get("role") == "user")
     if total_user < keep_pairs:
-        print(f"Only {total_user} user messages (need {keep_pairs}) — skipping")
-        sys.exit(1)
+        print(f"Only {total_user} user messages (need {keep_pairs}) — proceeding with shallow trim (keep all)")
 
     user_count = 0
-    cut_index = len(message_entries)
-    for i in range(len(message_entries) - 1, -1, -1):
-        if message_entries[i].get("message", {}).get("role") == "user":
-            user_count += 1
-            if user_count >= keep_pairs:
-                cut_index = i
-                break
+    cut_index = 0  # default: keep everything (shallow trim)
+    if total_user >= keep_pairs:
+        cut_index = len(message_entries)
+        for i in range(len(message_entries) - 1, -1, -1):
+            if message_entries[i].get("message", {}).get("role") == "user":
+                user_count += 1
+                if user_count >= keep_pairs:
+                    cut_index = i
+                    break
 
     kept_messages = message_entries[cut_index:]
     archived_messages = message_entries[:cut_index]
@@ -280,13 +281,13 @@ def main():
         if e.get("parentId") and e["parentId"] in kept_ids:
             trimmed.append(e)
 
-    # Post-trim size check: if the retained pairs alone still exceed trim_full_threshold_pct
-    # of the size limit, strip ALL assistant turns (not just non-recent ones) to minimize size.
+    # Post-trim size check: if still over threshold, first strip all assistant turns,
+    # then if STILL over threshold, drop all toolResult entries entirely.
     trimmed_size_kb = sum(len(json.dumps(e)) for e in trimmed) / 1024
     threshold_kb = trim_max_kb * (trim_full_threshold_pct / 100.0)
     if trimmed_size_kb > threshold_kb:
         print(f"Post-trim size {trimmed_size_kb:.0f}KB exceeds {trim_full_threshold_pct:.0f}% of limit "
-              f"({threshold_kb:.0f}KB) — stripping all pairs")
+              f"({threshold_kb:.0f}KB) — stripping all assistant pairs")
         stripped_trimmed = []
         for e in trimmed:
             if e.get("type") == "message" and e.get("message", {}).get("role") == "assistant":
@@ -295,7 +296,18 @@ def main():
                 stripped_trimmed.append(e)
         trimmed = stripped_trimmed
         new_size_kb = sum(len(json.dumps(e)) for e in trimmed) / 1024
-        print(f"After full strip: {new_size_kb:.0f}KB")
+        print(f"After assistant strip: {new_size_kb:.0f}KB")
+
+        # Still over threshold — drop ALL toolResult entries
+        if new_size_kb > threshold_kb:
+            print(f"Still {new_size_kb:.0f}KB over threshold — dropping all toolResult entries")
+            trimmed = [
+                e for e in trimmed
+                if not (e.get("type") == "message" and
+                        e.get("message", {}).get("role") == "toolResult")
+            ]
+            new_size_kb = sum(len(json.dumps(e)) for e in trimmed) / 1024
+            print(f"After toolResult drop: {new_size_kb:.0f}KB")
 
     # Archive original, write trimmed
     archive_path = f"{jsonl_file}.pre-trim.{datetime.now(tz=__import__('datetime').timezone.utc).strftime('%Y-%m-%dT%H-%M-%SZ')}"
