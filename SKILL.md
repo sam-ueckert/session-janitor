@@ -48,7 +48,8 @@ Edit `config.json` after setup to tune thresholds:
 | `keepFullPairs` | 2 | Most recent N assistant turns that keep full toolResult bodies (older turns are collapsed to summary lines) |
 | `minArchivePairs` | 5 | Informational only — no longer blocks trim. Sessions exceeding `trimMaxKB` are always trimmed. |
 | `trimFullThresholdPct` | 50 | Two-stage aggressive reduction when trimmed output still exceeds this % of `trimMaxKB`: (1) strip all assistant turns (tool args + thinking removed); (2) if still over threshold, drop all toolResult entries entirely. Set to 100 to disable. |
-| `archiveRetentionDays` | 7 | Delete old archives after this many days |
+| `archiveRetentionDays` | 7 | Delete old archives after this many days (applies to `.reset.*`, `.deleted.*`, `.pre-trim.*`, `.bak-*`, `.purged.*`, `.emergency-*`) |
+| `keepPreTrimFiles` | 3 | Max `.pre-trim.*` files to keep per session (oldest deleted immediately, regardless of retention period) |
 | `orphanGraceMinutes` | 30 | Wait before archiving orphan transcripts |
 | `staleSubagentHours` | 24 | Prune subagent session entries older than this |
 | `staleCronSessionHours` | 24 | Prune cron session entries older than this |

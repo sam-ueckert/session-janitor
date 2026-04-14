@@ -27,6 +27,7 @@ vals = {
     'MIN_ARCHIVE_PAIRS': c.get('minArchivePairs', 5),
     'TRIM_FULL_THRESHOLD_PCT': c.get('trimFullThresholdPct', 50),
     'ARCHIVE_RETENTION_DAYS': c.get('archiveRetentionDays', 7),
+    'KEEP_PRE_TRIM_FILES': c.get('keepPreTrimFiles', 3),
     'ORPHAN_GRACE_MINUTES': c.get('orphanGraceMinutes', 30),
     'STALE_SUBAGENT_HOURS': c.get('staleSubagentHours', 24),
     'STALE_CRON_SESSION_HOURS': c.get('staleCronSessionHours', 24),
@@ -235,11 +236,55 @@ print(count)
     local pruned_count
     pruned_count=$(python3 "$SCRIPTS_DIR/prune-sessions.py" "$sessions_json" "$STALE_SUBAGENT_HOURS" "$STALE_CRON_SESSION_HOURS")
 
-    # --- Remove old archives ---
+    # --- Per-session pre-trim cap: keep only the N most recent, delete the rest immediately ---
+    shopt -s nullglob
+    declare -A seen_bases
+    for pt in "$sessions_dir"/*.jsonl.pre-trim.*; do
+        base=$(echo "$pt" | sed 's|\.jsonl\.pre-trim\..*||')
+        seen_bases["$base"]=1
+    done
+    for base in "${!seen_bases[@]}"; do
+        mapfile -t pts < <(ls -t "${base}.jsonl.pre-trim."* 2>/dev/null)
+        if (( ${#pts[@]} > KEEP_PRE_TRIM_FILES )); then
+            excess=("${pts[@]:$KEEP_PRE_TRIM_FILES}")
+            for f in "${excess[@]}"; do
+                rm -f "$f"
+                archive_rm_count=$((archive_rm_count + 1))
+            done
+        fi
+    done
+    unset seen_bases
+    shopt -u nullglob
+
+    # --- Remove old archives (all known patterns) ---
     while IFS= read -r archive; do
         rm -f "$archive"
         archive_rm_count=$((archive_rm_count + 1))
-    done < <(find "$sessions_dir" -maxdepth 1 \( -name "*.reset.*" -o -name "*.deleted.*" -o -name "*.pre-trim.*" \) -mtime +${ARCHIVE_RETENTION_DAYS} 2>/dev/null)
+    done < <(find "$sessions_dir" -maxdepth 1 \
+        \( -name "*.reset.*" -o -name "*.deleted.*" -o -name "*.pre-trim.*" \
+           -o -name "*.bak-*" -o -name "*.purged.*" -o -name "*.emergency-*" \) \
+        -mtime +${ARCHIVE_RETENTION_DAYS} 2>/dev/null)
+
+    # --- Orphan toolcache cleanup ---
+    # Remove .toolcache/ dirs whose session is dead (no active .jsonl) and old enough
+    shopt -s nullglob
+    local tc_rm_count=0
+    for tc in "$sessions_dir"/*.toolcache; do
+        [[ -d "$tc" ]] || continue
+        local tc_sid
+        tc_sid=$(basename "$tc" .toolcache)
+        # Skip if active transcript exists
+        [[ -f "$sessions_dir/${tc_sid}.jsonl" ]] && continue
+        # Skip if the toolcache itself is too fresh (within orphan grace)
+        local tc_age_min
+        tc_age_min=$(( ( $(date +%s) - $(stat -c%Y "$tc" 2>/dev/null || echo 0) ) / 60 ))
+        (( tc_age_min < ORPHAN_GRACE_MINUTES )) && continue
+        rm -rf "$tc"
+        tc_rm_count=$((tc_rm_count + 1))
+        log "$name: removed orphan toolcache ${tc_sid}"
+    done
+    shopt -u nullglob
+    (( tc_rm_count > 0 )) && { archive_rm_count=$((archive_rm_count + tc_rm_count)); }
 
     # --- Report ---
     local changes=0
