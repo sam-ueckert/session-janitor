@@ -31,7 +31,9 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 STUB_MARKER = "[tool output offloaded to"
+IMAGE_STUB_MARKER = "[image offloaded to"
 DEFAULT_MIN_BYTES = 5120  # 5 KB per entry
+IMAGE_MIN_BYTES = 1024  # 1 KB — offload any non-trivial base64 image
 
 
 def entry_content_size(entry: dict) -> int:
@@ -81,6 +83,128 @@ def make_stub_content(sidecar_filename: str, byte_count: int) -> list:
     ]
 
 
+def offload_images_in_entry(entry, toolcache_dir, session_id, img_counter):
+    """Scan any entry's content for inline base64 images and offload them.
+
+    Returns (modified_entry, count_offloaded, new_img_counter).
+    """
+    import copy
+    import base64
+
+    msg = entry.get("message", {})
+    content = msg.get("content", [])
+    if not isinstance(content, list):
+        return entry, 0, img_counter
+
+    modified = False
+    new_content = []
+    offloaded = 0
+
+    for block in content:
+        if not isinstance(block, dict):
+            new_content.append(block)
+            continue
+
+        # Check for inline base64 image: {type: "image", data: "<base64>"}
+        if block.get("type") == "image" and block.get("data"):
+            b64_data = block["data"]
+            if len(b64_data) < IMAGE_MIN_BYTES:
+                new_content.append(block)
+                continue
+
+            # Already offloaded?
+            if IMAGE_STUB_MARKER in b64_data:
+                new_content.append(block)
+                continue
+
+            # Determine extension from mimeType
+            mime = block.get("mimeType", block.get("media_type", "image/jpeg"))
+            ext = {"image/jpeg": ".jpg", "image/png": ".png",
+                   "image/gif": ".gif", "image/webp": ".webp"}.get(mime, ".jpg")
+
+            entry_id = entry.get("id", f"unk-{img_counter}")
+            safe_id = "".join(c if c.isalnum() or c in "-." else "_" for c in entry_id)
+            sidecar_filename = f"{safe_id}_img_{img_counter}{ext}"
+            sidecar_path = toolcache_dir / sidecar_filename
+
+            # Decode and write binary image
+            toolcache_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                img_bytes = base64.b64decode(b64_data)
+                sidecar_path.write_bytes(img_bytes)
+            except Exception:
+                # Fallback: write raw base64 as text
+                sidecar_path.write_text(b64_data, encoding="utf-8")
+            actual_bytes = sidecar_path.stat().st_size
+
+            # Replace image block with text stub
+            stub_text = (
+                f"{IMAGE_STUB_MARKER} .toolcache/{sidecar_filename} — "
+                f"{actual_bytes} bytes ({mime}). "
+                f"Use the Read/image tool to access it if needed.]"
+            )
+            new_content.append({"type": "text", "text": stub_text})
+            offloaded += 1
+            img_counter += 1
+
+            b64_kb = len(b64_data) // 1024
+            print(f"  offloaded image ({entry_id[:12]}): {b64_kb}KB b64 → .toolcache/{sidecar_filename}")
+            modified = True
+            continue
+
+        # Also handle Anthropic-style source.data images:
+        # {type: "image", source: {type: "base64", media_type: "...", data: "..."}}
+        if block.get("type") == "image" and isinstance(block.get("source"), dict):
+            src = block["source"]
+            b64_data = src.get("data", "")
+            if len(b64_data) < IMAGE_MIN_BYTES:
+                new_content.append(block)
+                continue
+            if IMAGE_STUB_MARKER in b64_data:
+                new_content.append(block)
+                continue
+
+            mime = src.get("media_type", "image/jpeg")
+            ext = {"image/jpeg": ".jpg", "image/png": ".png",
+                   "image/gif": ".gif", "image/webp": ".webp"}.get(mime, ".jpg")
+
+            entry_id = entry.get("id", f"unk-{img_counter}")
+            safe_id = "".join(c if c.isalnum() or c in "-." else "_" for c in entry_id)
+            sidecar_filename = f"{safe_id}_img_{img_counter}{ext}"
+            sidecar_path = toolcache_dir / sidecar_filename
+
+            toolcache_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                img_bytes = base64.b64decode(b64_data)
+                sidecar_path.write_bytes(img_bytes)
+            except Exception:
+                sidecar_path.write_text(b64_data, encoding="utf-8")
+            actual_bytes = sidecar_path.stat().st_size
+
+            stub_text = (
+                f"{IMAGE_STUB_MARKER} .toolcache/{sidecar_filename} — "
+                f"{actual_bytes} bytes ({mime}). "
+                f"Use the Read/image tool to access it if needed.]"
+            )
+            new_content.append({"type": "text", "text": stub_text})
+            offloaded += 1
+            img_counter += 1
+
+            b64_kb = len(b64_data) // 1024
+            print(f"  offloaded image ({entry_id[:12]}): {b64_kb}KB b64 → .toolcache/{sidecar_filename}")
+            modified = True
+            continue
+
+        new_content.append(block)
+
+    if not modified:
+        return entry, 0, img_counter
+
+    new_entry = copy.deepcopy(entry)
+    new_entry["message"]["content"] = new_content
+    return new_entry, offloaded, img_counter
+
+
 def main():
     if len(sys.argv) < 3:
         print(f"Usage: {sys.argv[0]} <jsonl_file> <session_id> [min_entry_bytes]", file=sys.stderr)
@@ -114,9 +238,18 @@ def main():
     # Sidecar dir adjacent to the transcript
     toolcache_dir = jsonl_path.parent / f"{session_id}.toolcache"
     sidecared = 0
+    images_offloaded = 0
+    img_counter = 0
     changed = []
 
     for entry in entries:
+        # --- Phase 1: offload inline base64 images from ANY entry ---
+        entry, img_count, img_counter = offload_images_in_entry(
+            entry, toolcache_dir, session_id, img_counter
+        )
+        images_offloaded += img_count
+
+        # --- Phase 2: offload large toolResult text (existing behavior) ---
         msg = entry.get("message", {})
         if msg.get("role") != "toolResult":
             changed.append(entry)
@@ -158,7 +291,8 @@ def main():
             f"{actual_bytes // 1024}KB → .toolcache/{sidecar_filename}"
         )
 
-    if sidecared == 0:
+    total_offloaded = sidecared + images_offloaded
+    if total_offloaded == 0:
         print(f"No entries exceeded {min_bytes} bytes — nothing sidecared")
         sys.exit(0)
 
@@ -172,8 +306,13 @@ def main():
 
     orig_kb = sum(len(json.dumps(e)) for e in entries) // 1024
     new_kb = jsonl_path.stat().st_size // 1024
+    parts = []
+    if sidecared:
+        parts.append(f"{sidecared} tool outputs")
+    if images_offloaded:
+        parts.append(f"{images_offloaded} images")
     print(
-        f"Sidecar complete: {sidecared} entries offloaded, "
+        f"Sidecar complete: {' + '.join(parts)} offloaded, "
         f"{orig_kb}KB → {new_kb}KB "
         f"(sidecar dir: {toolcache_dir})"
     )
