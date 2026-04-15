@@ -15,7 +15,8 @@ Automated transcript and session hygiene for OpenClaw gateways.
 - **LLM memory extraction** — uses the gateway's chat completions API to extract structured memories (facts, decisions, lessons) from trimmed content before discarding
 - **Prunes stale sessions** — removes old subagent/cron session entries from sessions.json
 - **Archives orphan transcripts** — files with no active session after a grace period
-- **Cleans old archives** — removes pre-trim and reset files after retention period
+- **Cleans old archives** — removes pre-trim, reset, and checkpoint files after retention period
+- **Cleans orphaned checkpoints** — removes `*.checkpoint.*.jsonl` files left behind by auto-compaction once the parent session no longer has an active transcript
 
 ## Setup
 

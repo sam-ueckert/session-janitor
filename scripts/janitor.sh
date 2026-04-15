@@ -265,6 +265,31 @@ print(count)
            -o -name "*.bak-*" -o -name "*.purged.*" -o -name "*.emergency-*" \) \
         -mtime +${ARCHIVE_RETENTION_DAYS} 2>/dev/null)
 
+    # --- Orphan checkpoint cleanup ---
+    # Checkpoint files (*.checkpoint.*.jsonl) are created by auto-compaction.
+    # Remove them when their parent session no longer has an active .jsonl,
+    # or when they are older than archiveRetentionDays.
+    shopt -s nullglob
+    local cp_rm_count=0
+    for cpf in "$sessions_dir"/*.checkpoint.*.jsonl; do
+        [[ -f "$cpf" ]] || continue
+        # Extract the session ID (everything before .checkpoint.)
+        local cp_sid
+        cp_sid=$(basename "$cpf" | sed 's|\.checkpoint\..*||')
+        # If the active transcript still exists, skip (compaction may be in flight)
+        if [[ -f "$sessions_dir/${cp_sid}.jsonl" ]]; then
+            # Only delete if it's older than retention (gives in-flight compaction plenty of time)
+            local cp_age_days
+            cp_age_days=$(( ( $(date +%s) - $(stat -c%Y "$cpf" 2>/dev/null || echo 0) ) / 86400 ))
+            (( cp_age_days < ARCHIVE_RETENTION_DAYS )) && continue
+        fi
+        rm -f "$cpf"
+        cp_rm_count=$((cp_rm_count + 1))
+        log "$name: removed orphaned checkpoint for $cp_sid"
+    done
+    shopt -u nullglob
+    (( cp_rm_count > 0 )) && { archive_rm_count=$((archive_rm_count + cp_rm_count)); }
+
     # --- Orphan toolcache cleanup ---
     # Remove .toolcache/ dirs whose session is dead (no active .jsonl) and old enough
     shopt -s nullglob
