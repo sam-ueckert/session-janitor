@@ -180,12 +180,17 @@ for k, v in d.get('sessions', d).items():
         break
 " 2>/dev/null)
             if [[ -n "$session_key" ]]; then
-                curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
-                    -H "Authorization: Bearer $token" \
-                    -H "Content-Type: application/json" \
-                    -H "x-openclaw-session-key: $session_key" \
-                    -d '{"model":"openclaw","messages":[{"role":"user","content":"[session trimmed by maintenance — acknowledge with NO_REPLY]"}]}' \
-                    >/dev/null 2>&1 && log "$name: gateway reload pinged for $session_key" || true
+                # Skip sub-agent sessions — the reload ping re-triggers full runs on them
+                if [[ "$session_key" == *":subagent:"* ]]; then
+                    log "$name: skipping reload ping for sub-agent session $session_key"
+                else
+                    curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
+                        -H "Authorization: Bearer $token" \
+                        -H "Content-Type: application/json" \
+                        -H "x-openclaw-session-key: $session_key" \
+                        -d '{"model":"openclaw","messages":[{"role":"user","content":"[session trimmed by maintenance — acknowledge with NO_REPLY]"}]}' \
+                        >/dev/null 2>&1 && log "$name: gateway reload pinged for $session_key" || true
+                fi
             fi
         fi
     else
