@@ -136,6 +136,25 @@ Alert cooldown is 10 minutes per session to prevent spam. State is tracked in th
 bash skills/session-janitor/scripts/watchdog.sh 5 ~/.openclaw/session-janitor-state.json
 ```
 
+## Sub-Agent Reporting Conventions
+
+Workers spawned via Foreman should use prefixed `sessions_send` messages to prevent the parent agent from spawning new sub-agents in response to status updates:
+
+```
+# Intermediate status (fire-and-forget — parent relays but does NOT spawn)
+sessions_send(sessionKey="{PARENT}", message="STATUS: 🤖 [label]: doing X (60%)", timeoutSeconds=0)
+
+# Errors/failures (normal delivery — parent may intervene)
+sessions_send(sessionKey="{PARENT}", message="ERROR: 🤖 [label]: what failed — details")
+
+# Completion (no prefix, normal delivery)
+sessions_send(sessionKey="{PARENT}", message="🤖 [label]: ✅ done — summary")
+```
+
+- `STATUS:` → relay-only; `timeoutSeconds=0` prevents reply-back loops
+- `ERROR:` → parent receives and considers recovery action
+- No prefix → completion; parent handles and relays to channel
+
 ## Files
 
 ```
