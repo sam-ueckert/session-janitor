@@ -51,6 +51,7 @@
     "enabled": true,
     "path": "/home/swabby/bin/mem"
   },
+  "sceneFilesPath": "/home/swabby/repos/swabby-brain/memory/private",
   "stateFile": "/home/swabby/.openclaw/session-janitor-state.json",
   "sidecar": {
     "enabled": true,

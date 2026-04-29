@@ -123,19 +123,115 @@ def parse_memories(llm_output, max_memories=DEFAULT_MAX_MEMORIES):
         except: continue
     return memories[:max_memories]
 
-def store_memories(memories, mem_enabled, mem_path):
-    if not mem_enabled: return 0
-    stored = 0
+# Scene label → file mapping for scene file writes
+SCENE_FILE_MAP = {
+    "infra": "scene-infrastructure.md",
+    "infrastructure": "scene-infrastructure.md",
+    "k8s": "scene-infrastructure.md",
+    "kubernetes": "scene-infrastructure.md",
+    "networking": "scene-infrastructure.md",
+    "network": "scene-infrastructure.md",
+    "config": "scene-config.md",
+    "gateway": "scene-config.md",
+    "openclaw": "scene-config.md",
+    "configuration": "scene-config.md",
+    "projects": "scene-projects.md",
+    "project": "scene-projects.md",
+    "cyrano": "scene-projects.md",
+    "groomer": "scene-projects.md",
+    "archy": "scene-projects.md",
+    "lessons": "scene-lessons.md",
+    "lesson": "scene-lessons.md",
+    "commodore": "scene-commodore.md",
+    "personal": "scene-commodore.md",
+    "preferences": "scene-commodore.md",
+    "accounts": "scene-accounts.md",
+    "account": "scene-accounts.md",
+    "auth": "scene-accounts.md",
+}
+SCENE_FILE_DEFAULT = "scene-infrastructure.md"
+
+def write_to_scene_files(memories, scene_dir):
+    """Append extracted memories to git-backed scene files for durable recovery."""
+    if not scene_dir or not os.path.isdir(scene_dir):
+        return 0
+    from datetime import date
+    today = date.today().isoformat()
+    written = 0
     for mem in memories:
+        scene_label = mem.get("scene", "").lower()
+        filename = SCENE_FILE_MAP.get(scene_label, SCENE_FILE_DEFAULT)
+        filepath = os.path.join(scene_dir, filename)
+        sal = mem.get("salience", 0.5)
+        mtype = mem.get("type", "fact")
+        content = mem.get("content", "").replace('\n', ' ').strip()
+        if not content:
+            continue
+        line = f"- [{mtype}] (sal: {sal:.1f}) {content}  # janitor {today}\n"
         try:
-            result = subprocess.run(
-                [mem_path, "quick-store", mem["scene"], mem["type"], str(mem["salience"]), mem["content"]],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 0: stored += 1
-            else: print(f"mem store failed: {result.stderr.strip()}", file=sys.stderr)
+            with open(filepath, "a") as f:
+                f.write(line)
+            written += 1
         except Exception as e:
-            print(f"mem store error: {e}", file=sys.stderr)
+            print(f"scene file write error ({filepath}): {e}", file=sys.stderr)
+    return written
+
+def git_commit_scene_files(scene_dir):
+    """Commit and push scene file updates to git repo."""
+    repo_dir = os.path.dirname(os.path.dirname(scene_dir))  # memory/private/ -> repo root
+    try:
+        # Check if anything changed
+        result = subprocess.run(
+            ["git", "-C", repo_dir, "status", "--porcelain", "memory/private/scene-*.md"],
+            capture_output=True, text=True, timeout=10
+        )
+        # Use glob since git status porcelain doesn't expand globs
+        import glob
+        scene_files = glob.glob(os.path.join(scene_dir, "scene-*.md"))
+        changed = []
+        for sf in scene_files:
+            rel = os.path.relpath(sf, repo_dir)
+            r2 = subprocess.run(
+                ["git", "-C", repo_dir, "diff", "--quiet", rel],
+                capture_output=True, timeout=5
+            )
+            if r2.returncode != 0:
+                changed.append(rel)
+        if not changed:
+            print("No scene file changes to commit")
+            return
+        for rel in changed:
+            subprocess.run(["git", "-C", repo_dir, "add", rel], timeout=5, check=True)
+        from datetime import date
+        msg = f"janitor: scene file update {date.today().isoformat()}"
+        subprocess.run(["git", "-C", repo_dir, "commit", "-m", msg], timeout=10, check=True)
+        subprocess.run(["git", "-C", repo_dir, "push"], timeout=30, check=True)
+        print(f"Committed and pushed {len(changed)} scene file(s)")
+    except subprocess.CalledProcessError as e:
+        print(f"git commit/push failed (non-fatal): {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"git error (non-fatal): {e}", file=sys.stderr)
+
+def store_memories(memories, mem_enabled, mem_path, scene_dir=None):
+    stored = 0
+    if mem_enabled:
+        for mem in memories:
+            try:
+                result = subprocess.run(
+                    [mem_path, "quick-store", mem["scene"], mem["type"], str(mem["salience"]), mem["content"]],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0: stored += 1
+                else: print(f"mem store failed: {result.stderr.strip()}", file=sys.stderr)
+            except Exception as e:
+                print(f"mem store error: {e}", file=sys.stderr)
+    # Write to scene files (always, if path provided — DB is derived, files are durable)
+    scene_written = 0
+    if scene_dir:
+        scene_written = write_to_scene_files(memories, scene_dir)
+        if scene_written > 0:
+            git_commit_scene_files(scene_dir)
+            print(f"Wrote {scene_written} memories to scene files")
     return stored
 
 def main():
@@ -147,11 +243,12 @@ def main():
     state_file, api_url, api_token = sys.argv[5:8]
     mem_enabled = sys.argv[8].lower() == "true" if len(sys.argv) > 8 else False
     mem_path = sys.argv[9] if len(sys.argv) > 9 else "mem"
-    model = sys.argv[10] if len(sys.argv) > 10 else DEFAULT_MODEL
-    max_input_chars = int(sys.argv[11]) if len(sys.argv) > 11 else DEFAULT_MAX_INPUT_CHARS
-    api_timeout_secs = int(sys.argv[12]) if len(sys.argv) > 12 else DEFAULT_API_TIMEOUT_SECS
-    max_memories = int(sys.argv[13]) if len(sys.argv) > 13 else DEFAULT_MAX_MEMORIES
-    min_archived = int(sys.argv[14]) if len(sys.argv) > 14 else DEFAULT_MIN_ARCHIVED
+    scene_dir = sys.argv[10] if len(sys.argv) > 10 else None
+    model = sys.argv[11] if len(sys.argv) > 11 else DEFAULT_MODEL
+    max_input_chars = int(sys.argv[12]) if len(sys.argv) > 12 else DEFAULT_MAX_INPUT_CHARS
+    api_timeout_secs = int(sys.argv[13]) if len(sys.argv) > 13 else DEFAULT_API_TIMEOUT_SECS
+    max_memories = int(sys.argv[14]) if len(sys.argv) > 14 else DEFAULT_MAX_MEMORIES
+    min_archived = int(sys.argv[15]) if len(sys.argv) > 15 else DEFAULT_MIN_ARCHIVED
 
     # Lockfile
     lock_fd = None
@@ -196,7 +293,7 @@ def main():
             print("LLM returned no valid memories")
             sys.exit(0)
 
-        stored = store_memories(memories, mem_enabled, mem_path)
+        stored = store_memories(memories, mem_enabled, mem_path, scene_dir)
         print(f"Extracted {len(memories)} memories, stored {stored} to mem DB")
 
         # Update dedup state

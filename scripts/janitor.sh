@@ -41,6 +41,7 @@ vals = {
     'LLM_MIN_ARCHIVED': c.get('llmExtraction',{}).get('minArchived', 3),
     'MEM_ENABLED': str(c.get('memCli',{}).get('enabled', False)).lower(),
     'MEM_PATH': c.get('memCli',{}).get('path', 'mem'),
+    'SCENE_FILES_PATH': os.path.expanduser(c.get('sceneFilesPath', '')),
     'STATE_FILE': os.path.expanduser(c.get('stateFile', '~/.openclaw/session-janitor-state.json')),
     'GATEWAY_COUNT': len(c.get('gateways', [])),
 }
@@ -161,6 +162,7 @@ if changed:
                             if python3 "$SCRIPTS_DIR/extract-llm.py" \
                                 "$pre_trim_file" "$jsonl" "$sid" "$name" "$STATE_FILE" \
                                 "$llm_api_url" "$LLM_TOKEN" "$MEM_ENABLED" "$MEM_PATH" \
+                                "$SCENE_FILES_PATH" \
                                 "$LLM_MODEL" "$LLM_MAX_INPUT_CHARS" "$LLM_TIMEOUT_SECS" \
                                 "$LLM_MAX_MEMORIES" "$LLM_MIN_ARCHIVED" 2>&1; then
                                 log "$name: LLM extraction complete for $sid"
