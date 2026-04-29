@@ -65,6 +65,10 @@ Edit `config.json` after setup to tune thresholds:
 | `cronSchedule` | `*/15 * * * *` | How often to run |
 | `sidecar.enabled` | true | Offload large toolResult entries to `.toolcache/` files |
 | `sidecar.minEntryBytes` | 5120 | Minimum toolResult content size (bytes) to trigger offload |
+| `extractOnTrim.enabled` | false | Fire async LLM memory extraction after each watcher-triggered trim |
+| `extractOnTrim.minArchivedPairs` | 3 | Minimum archived message pairs required before running extraction |
+| `extractOnTrim.scene` | `auto` | Memory scene tag to use (`auto` lets the LLM infer from context) |
+| `extractOnTrim.salience` | 0.5 | Default salience for extracted memories (0.1–1.0) |
 | `watchdog.enabled` | false | Run hung-session detector after each janitor pass |
 | `watchdog.staleMinutes` | 5 | Session `updatedAt` age threshold to consider stuck |
 | `watchdog.alertSlack` | true | Send Slack DM when a stuck session is detected |

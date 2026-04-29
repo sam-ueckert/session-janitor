@@ -58,6 +58,12 @@
     "minEntryBytes": 5120
   },
   "watcherDebounceSecs": 3,
+  "extractOnTrim": {
+    "enabled": true,
+    "minArchivedPairs": 3,
+    "scene": "auto",
+    "salience": 0.5
+  },
   "watchdog": {
     "enabled": false
   },

@@ -31,6 +31,15 @@ print(c.get('$1', '$2'))
 "
 }
 
+# Load extractOnTrim config (re-read each time for live config updates)
+read_extract_on_trim_val() {
+    python3 -c "
+import json, os
+c = json.load(open('$CONFIG_FILE'))
+print(c.get('extractOnTrim', {}).get('$1', '$2'))
+"
+}
+
 TRIM_MAX_KB=$(read_config_val trimMaxKB 250)
 KEEP_PAIRS=$(read_config_val keepPairs 10)
 KEEP_FULL_PAIRS=$(read_config_val keepFullPairs 2)
@@ -167,6 +176,31 @@ for k, v in d.get('sessions', d).items():
 
     if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" "$MIN_ARCHIVE_PAIRS" "$TRIM_FULL_THRESHOLD_PCT" "$TRIM_MAX_KB" 2>&1; then
         log "$name: trim complete for $sid"
+
+        # Async memory extraction from archived content (if enabled)
+        local extract_enabled
+        extract_enabled=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(str(c.get('extractOnTrim',{}).get('enabled',False)).lower())" 2>/dev/null)
+        if [[ "$extract_enabled" == "true" ]]; then
+            # Find the .pre-trim.* archive written by trim.py
+            local pre_trim_file
+            pre_trim_file=$(ls -t "${jsonl}.pre-trim."* 2>/dev/null | head -1)
+            if [[ -n "$pre_trim_file" ]]; then
+                local extract_scene extract_salience extract_min
+                extract_scene=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('extractOnTrim',{}).get('scene','auto'))" 2>/dev/null)
+                extract_salience=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('extractOnTrim',{}).get('salience',0.5))" 2>/dev/null)
+                extract_min=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('extractOnTrim',{}).get('minArchivedPairs',3))" 2>/dev/null)
+                local gw_url="http://127.0.0.1:${port}"
+                log "$name: firing async extract-llm for $sid (pre-trim: $pre_trim_file)"
+                python3 "$SCRIPTS_DIR/extract-llm.py" \
+                    "$pre_trim_file" "$jsonl" "$sid" "$gw_url" "$STATE_FILE" \
+                    "${gw_url}/v1/chat/completions" "$token" \
+                    "true" "mem" "$extract_scene" "openclaw" "20000" "60" "15" "$extract_min" \
+                    >> /tmp/janitor-extract.log 2>&1 &
+                log "$name: extract-llm launched async (pid $!)"
+            else
+                log "$name: extractOnTrim enabled but no pre-trim file found for $sid"
+            fi
+        fi
 
         # Ping gateway to reload
         if [[ -n "$token" && -n "$port" ]]; then
