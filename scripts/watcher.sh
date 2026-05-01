@@ -162,12 +162,16 @@ for k, v in d.get('sessions', d).items():
         break
 " 2>/dev/null)
                 if [[ -n "$session_key" ]]; then
-                    curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
-                        -H "Authorization: Bearer $token" \
-                        -H "Content-Type: application/json" \
-                        -H "x-openclaw-session-key: $session_key" \
-                        -d '{"model":"openclaw","messages":[{"role":"user","content":"[tool outputs sidecared — acknowledge with NO_REPLY]"}]}' \
-                        >/dev/null 2>&1 && log "$name: gateway reload pinged after sidecar for $session_key" || true
+                    if [[ "$session_key" == *":direct:"* ]]; then
+                        curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
+                            -H "Authorization: Bearer $token" \
+                            -H "Content-Type: application/json" \
+                            -H "x-openclaw-session-key: $session_key" \
+                            -d '{"model":"openclaw","messages":[{"role":"user","content":"[tool outputs sidecared — acknowledge with NO_REPLY]"}]}' \
+                            >/dev/null 2>&1 && log "$name: gateway reload pinged after sidecar for $session_key" || true
+                    else
+                        log "$name: skipping sidecar reload ping for non-direct session $session_key"
+                    fi
                 fi
             fi
             return
@@ -215,15 +219,19 @@ for k, v in d.get('sessions', d).items():
 " 2>/dev/null)
             if [[ -n "$session_key" ]]; then
                 # Skip sub-agent sessions — the reload ping re-triggers full runs on them
-                if [[ "$session_key" == *":subagent:"* ]]; then
-                    log "$name: skipping reload ping for sub-agent session $session_key"
-                else
+                # Only reload-ping direct sessions — webchat/subagent/cron sessions
+                # get disrupted by the reload (tools abort, task re-delivered).
+                # Root-caused 2026-05-01: Foreman worker sessions (openai webchat)
+                # lost all gateway-native tools after a reload ping mid-run.
+                if [[ "$session_key" == *":direct:"* ]]; then
                     curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
                         -H "Authorization: Bearer $token" \
                         -H "Content-Type: application/json" \
                         -H "x-openclaw-session-key: $session_key" \
                         -d '{"model":"openclaw","messages":[{"role":"user","content":"[session trimmed by maintenance — acknowledge with NO_REPLY]"}]}' \
                         >/dev/null 2>&1 && log "$name: gateway reload pinged for $session_key" || true
+                else
+                    log "$name: skipping reload ping for non-direct session $session_key (trim still applied on disk)"
                 fi
             fi
         fi
