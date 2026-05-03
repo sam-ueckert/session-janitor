@@ -22,6 +22,25 @@ fi
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [watcher] $*"; }
 
+# Check if a session_key belongs to an active foreman worker (skip reload to avoid aborting in-flight requests)
+ACTIVE_WORKERS_FILE="$HOME/repos/swabby-brain/memory/active-workers.json"
+is_active_worker_session() {
+    local sk="$1"
+    [[ -f "$ACTIVE_WORKERS_FILE" ]] || return 1
+    python3 -c "
+import json, sys
+sk = sys.argv[1]
+try:
+    d = json.load(open('$ACTIVE_WORKERS_FILE'))
+    for w in d.get('workers', []):
+        if w.get('session_key') == sk and w.get('status') in ('starting', 'running', 'blocked'):
+            sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+" "$sk" 2>/dev/null
+}
+
 # Load config values
 read_config_val() {
     python3 -c "
@@ -162,7 +181,9 @@ for k, v in d.get('sessions', d).items():
         break
 " 2>/dev/null)
                 if [[ -n "$session_key" ]]; then
-                    if [[ "$session_key" == *":direct:"* ]]; then
+                    if is_active_worker_session "$session_key"; then
+                        log "$name: skipping sidecar reload ping — active foreman worker session $session_key"
+                    elif [[ "$session_key" == *":direct:"* ]]; then
                         curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
                             -H "Authorization: Bearer $token" \
                             -H "Content-Type: application/json" \
@@ -218,12 +239,11 @@ for k, v in d.get('sessions', d).items():
         break
 " 2>/dev/null)
             if [[ -n "$session_key" ]]; then
-                # Skip sub-agent sessions — the reload ping re-triggers full runs on them
-                # Only reload-ping direct sessions — webchat/subagent/cron sessions
-                # get disrupted by the reload (tools abort, task re-delivered).
-                # Root-caused 2026-05-01: Foreman worker sessions (openai webchat)
-                # lost all gateway-native tools after a reload ping mid-run.
-                if [[ "$session_key" == *":direct:"* ]]; then
+                # Skip active foreman worker sessions — reload aborts in-flight API requests
+                # Root-caused 2026-05-02: janitor reload POST killed workers mid-turn
+                if is_active_worker_session "$session_key"; then
+                    log "$name: skipping reload ping — active foreman worker session $session_key (trim still applied on disk)"
+                elif [[ "$session_key" == *":direct:"* ]]; then
                     curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
                         -H "Authorization: Bearer $token" \
                         -H "Content-Type: application/json" \
