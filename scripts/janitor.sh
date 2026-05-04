@@ -120,6 +120,7 @@ for v in d.get('sessions', d).values():
         [[ "$jsonl" == *".reset."* ]] && continue
         [[ "$jsonl" == *".deleted."* ]] && continue
         [[ "$jsonl" == *".pre-trim."* ]] && continue
+        [[ "$jsonl" == *".trajectory."* ]] && continue  # OC runtime telemetry, not a transcript
 
         local sid size_kb
         sid=$(basename "$jsonl" .jsonl)
