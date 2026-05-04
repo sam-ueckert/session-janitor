@@ -29,9 +29,9 @@
       "token": "49c41c869ceaf39f6b0345b5ec89cf578bc9d06a90fd7b4a"
     }
   ],
-  "trimMaxKB": 100,
-  "keepPairs": 10,
-  "keepFullPairs": 2,
+  "trimMaxKB": 300,
+  "keepPairs": 20,
+  "keepFullPairs": 4,
   "minArchivePairs": 5,
   "trimFullThresholdPct": 50,
   "archiveRetentionDays": 7,
