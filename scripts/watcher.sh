@@ -131,6 +131,7 @@ fire_trim() {
     [[ "$jsonl" == *".reset."* ]] && return
     [[ "$jsonl" == *".deleted."* ]] && return
     [[ "$jsonl" == *".pre-trim."* ]] && return
+    [[ "$jsonl" == *".trajectory."* ]] && return  # OpenClaw runtime telemetry, not a transcript
     [[ ! -f "$jsonl" ]] && return
 
     local size_kb
@@ -289,11 +290,12 @@ start_watcher() {
 }
 
 start_watcher | while IFS= read -r filepath; do
-    # Only care about .jsonl files (not .pre-trim., .reset., etc.)
+    # Only care about .jsonl files (not .pre-trim., .reset., trajectory, etc.)
     [[ "$filepath" == *.jsonl ]] || continue
     [[ "$filepath" == *".pre-trim."* ]] && continue
     [[ "$filepath" == *".reset."* ]] && continue
     [[ "$filepath" == *".deleted."* ]] && continue
+    [[ "$filepath" == *".trajectory."* ]] && continue  # OpenClaw runtime telemetry, not a transcript
 
     PENDING["$filepath"]=$(date +%s)
 
