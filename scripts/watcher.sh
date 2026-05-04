@@ -142,6 +142,7 @@ fire_trim() {
 
     local sid
     sid=$(basename "$jsonl" .jsonl)
+    sid="${sid%.trajectory}"  # Strip .trajectory suffix so UUID matches sessions.json
 
     # Verify it's an active session
     local sessions_json="$sessions_dir/sessions.json"
