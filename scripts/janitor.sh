@@ -155,27 +155,33 @@ if changed:
                     reset_count=$((reset_count + 1))
 
                     # LLM extraction of archived content
-                    if [[ "$LLM_ENABLED" == "true" ]] && (( LLM_EXTRACTIONS_THIS_RUN < LLM_MAX_PER_RUN )); then
-                        local pre_trim_file
-                        pre_trim_file=$(ls -t "${jsonl}.pre-trim."* 2>/dev/null | head -1)
-                        if [[ -n "$pre_trim_file" ]]; then
-                            local llm_api_url="http://127.0.0.1:${LLM_PORT}"
-                            if python3 "$SCRIPTS_DIR/extract-llm.py" \
-                                "$pre_trim_file" "$jsonl" "$sid" "$name" "$STATE_FILE" \
-                                "$llm_api_url" "$LLM_TOKEN" "$MEM_ENABLED" "$MEM_PATH" \
-                                "$SCENE_FILES_PATH" \
-                                "$LLM_MODEL" "$LLM_MAX_INPUT_CHARS" "$LLM_TIMEOUT_SECS" \
-                                "$LLM_MAX_MEMORIES" "$LLM_MIN_ARCHIVED" 2>&1; then
-                                log "$name: LLM extraction complete for $sid"
-                                LLM_EXTRACTIONS_THIS_RUN=$((LLM_EXTRACTIONS_THIS_RUN + 1))
-                            else
-                                local exit_code=$?
-                                if [[ $exit_code -eq 2 ]]; then
-                                    log "$name: LLM extraction failed for $sid"
+                    if [[ "$LLM_ENABLED" == "true" ]]; then
+                        if (( LLM_EXTRACTIONS_THIS_RUN < LLM_MAX_PER_RUN )); then
+                            local pre_trim_file
+                            pre_trim_file=$(ls -t "${jsonl}.pre-trim."* 2>/dev/null | head -1)
+                            if [[ -n "$pre_trim_file" ]]; then
+                                local llm_api_url="http://127.0.0.1:${LLM_PORT}"
+                                if python3 "$SCRIPTS_DIR/extract-llm.py" \
+                                    "$pre_trim_file" "$jsonl" "$sid" "$name" "$STATE_FILE" \
+                                    "$llm_api_url" "$LLM_TOKEN" "$MEM_ENABLED" "$MEM_PATH" \
+                                    "$SCENE_FILES_PATH" \
+                                    "$LLM_MODEL" "$LLM_MAX_INPUT_CHARS" "$LLM_TIMEOUT_SECS" \
+                                    "$LLM_MAX_MEMORIES" "$LLM_MIN_ARCHIVED" 2>&1; then
+                                    log "$name: LLM extraction complete for $sid"
+                                    LLM_EXTRACTIONS_THIS_RUN=$((LLM_EXTRACTIONS_THIS_RUN + 1))
                                 else
-                                    log "$name: LLM extraction skipped for $sid (dedup/lock/insufficient)"
+                                    local exit_code=$?
+                                    if [[ $exit_code -eq 2 ]]; then
+                                        log "ERROR: $name: LLM extraction FAILED for $sid — check API/mem CLI"
+                                    else
+                                        log "$name: LLM extraction skipped for $sid (dedup/lock/insufficient)"
+                                    fi
                                 fi
+                            else
+                                log "$name: LLM extraction skipped for $sid (no pre-trim file found after trim)"
                             fi
+                        else
+                            log "WARNING: $name: LLM extraction RATE-LIMITED for $sid (maxPerRun=${LLM_MAX_PER_RUN} reached) — will extract on next janitor run"
                         fi
                     fi
 

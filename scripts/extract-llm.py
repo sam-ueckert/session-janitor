@@ -222,7 +222,7 @@ def store_memories(memories, mem_enabled, mem_path, scene_dir=None):
                     capture_output=True, text=True, timeout=10
                 )
                 if result.returncode == 0: stored += 1
-                else: print(f"mem store failed: {result.stderr.strip()}", file=sys.stderr)
+                else: print(f"ERROR: mem store failed (rc={result.returncode}): {result.stderr.strip() or result.stdout.strip()}", file=sys.stderr)
             except Exception as e:
                 print(f"mem store error: {e}", file=sys.stderr)
     # Write to scene files (always, if path provided — DB is derived, files are durable)
