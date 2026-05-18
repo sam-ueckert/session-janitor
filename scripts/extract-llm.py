@@ -4,7 +4,7 @@
 Usage: extract-llm.py <pre_trim> <trimmed> <sid> <gateway> <state_file> <api_url> <api_token> <mem_enabled> <mem_path>
 
 Guardrails: lockfile, 20K char cap, 60s timeout, dedup via state file.
-Exit 0 = success/skip, 2 = LLM failure (caller should fall back).
+Exit 0 = success (memories extracted), 1 = skipped (dedup/lock/insufficient), 2 = LLM failure.
 """
 import json, sys, os, subprocess, fcntl, signal
 from datetime import datetime
@@ -39,6 +39,28 @@ TRANSCRIPT:
 
 def timeout_handler(signum, frame):
     raise TimeoutError("API call exceeded timeout")
+
+def extract_full_pretrim_content(pre_trim_file):
+    """Read all user/assistant messages from a pre-trim snapshot for fallback extraction."""
+    messages = []
+    with open(pre_trim_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            try:
+                e = json.loads(line)
+                if e.get("type") != "message": continue
+                role = e.get("message", {}).get("role", "")
+                if role not in ("user", "assistant"): continue
+                content = e.get("message", {}).get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(c.get("text", "") for c in content if c.get("type") == "text")
+                content = content.strip()
+                if not content or content in ("NO_REPLY", "HEARTBEAT_OK"): continue
+                if content.startswith("Read HEARTBEAT"): continue
+                messages.append({"role": role, "content": content})
+            except: continue
+    return messages
 
 def extract_archived_content(pre_trim_file, trimmed_file):
     pre_entries = []
@@ -257,7 +279,7 @@ def main():
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (IOError, OSError):
         print("Another LLM extraction is running — skipping")
-        sys.exit(0)
+        sys.exit(1)
 
     try:
         state = {}
@@ -268,19 +290,29 @@ def main():
         llm_key = f"llm-{session_id}-{os.path.basename(pre_trim_file)}"
         if llm_key in state.get("llm_extracted", {}):
             print(f"Already extracted {llm_key} — skipping")
-            sys.exit(0)
+            sys.exit(1)
 
         if not os.path.exists(pre_trim_file):
             print(f"Pre-trim file not found: {pre_trim_file}", file=sys.stderr)
             sys.exit(1)
 
         archived = extract_archived_content(pre_trim_file, trimmed_file)
+        fallback_mode = False
         if len(archived) < min_archived:
-            print(f"Only {len(archived)} archived messages (need {min_archived}) — not enough")
-            sys.exit(0)
+            print(f"Only {len(archived)} archived messages (need {min_archived}) — falling back to full pre-trim content")
+            archived = extract_full_pretrim_content(pre_trim_file)
+            fallback_mode = True
+            if len(archived) < min_archived:
+                print(f"Pre-trim has only {len(archived)} messages — skipping LLM extraction (insufficient content)")
+                # Record the skip so we don't retry on every heartbeat
+                skip_key = f"skip-{session_id}-{os.path.basename(pre_trim_file)}"
+                state.setdefault("skipped", {})[skip_key] = datetime.now().isoformat()
+                json.dump(state, open(state_file, "w"), indent=2)
+                sys.exit(1)
 
         transcript_text = format_for_llm(archived, max_input_chars)
-        print(f"Sending {len(transcript_text)} chars ({len(archived)} messages) to LLM...")
+        mode_label = "full pre-trim fallback" if fallback_mode else "archived diff"
+        print(f"Sending {len(transcript_text)} chars ({len(archived)} messages, {mode_label}) to LLM...")
 
         try:
             llm_output = call_llm(api_url, api_token, transcript_text, model, api_timeout_secs)
@@ -291,7 +323,7 @@ def main():
         memories = parse_memories(llm_output, max_memories)
         if not memories:
             print("LLM returned no valid memories")
-            sys.exit(0)
+            sys.exit(1)
 
         stored = store_memories(memories, mem_enabled, mem_path, scene_dir)
         print(f"Extracted {len(memories)} memories, stored {stored} to mem DB")
