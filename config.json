@@ -16,7 +16,7 @@
     }
   ],
   "trimMaxKB": 300,
-  "keepPairs": 20,
+  "keepPairs": 8,
   "keepFullPairs": 4,
   "minArchivePairs": 5,
   "trimFullThresholdPct": 50,
