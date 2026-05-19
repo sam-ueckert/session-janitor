@@ -1,0 +1,73 @@
+#!/bin/bash
+# cron-sweep.sh — Periodic fallback sweep for oversized transcripts
+#
+# Backstop for inotify misses during rapid burst writes (compaction loops,
+# heavy tool-call sequences). Runs every 2 min via cron.
+#
+# Cron entry (install via: crontab -e):
+#   */2 * * * * /home/swabby/repos/swabby-brain/skills/session-janitor/scripts/cron-sweep.sh >> /tmp/session-janitor.log 2>&1
+
+export PATH="/home/swabby/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_DIR="$(dirname "$SCRIPT_DIR")"
+CONFIG_FILE="$SKILL_DIR/config.json"
+LOG_FILE="/tmp/session-janitor.log"
+LOCK_FILE="/tmp/session-janitor-sweep.lock"
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sweep] $*"; }
+
+# Prevent overlapping runs
+if [ -f "$LOCK_FILE" ]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0) ))
+    if (( age < 110 )); then
+        exit 0
+    fi
+    log "WARN: stale lock (${age}s) — removing"
+fi
+touch "$LOCK_FILE"
+trap 'rm -f "$LOCK_FILE"' EXIT
+
+# Read config
+TRIM_MAX_KB=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('trimMaxKB',300))" 2>/dev/null || echo 300)
+KEEP_PAIRS=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('keepPairs',20))" 2>/dev/null || echo 20)
+KEEP_FULL_PAIRS=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('keepFullPairs',4))" 2>/dev/null || echo 4)
+MIN_ARCHIVE_PAIRS=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('minArchivePairs',5))" 2>/dev/null || echo 5)
+TRIM_FULL_THRESHOLD_PCT=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('trimFullThresholdPct',50))" 2>/dev/null || echo 50)
+STATE_FILE=$(python3 -c "import json,os; c=json.load(open('$CONFIG_FILE')); print(os.path.expanduser(c.get('stateFile','~/.openclaw/session-janitor-state.json')))" 2>/dev/null || echo "$HOME/.openclaw/session-janitor-state.json")
+
+# Session dirs + gateway names from config
+GATEWAYS=$(python3 -c "
+import json
+c = json.load(open('$CONFIG_FILE'))
+for gw in c.get('gateways', []):
+    print(gw['name'] + '|' + gw['sessionsDir'])
+" 2>/dev/null)
+
+swept=0
+while IFS='|' read -r gw_name sessions_dir; do
+    [ -d "$sessions_dir" ] || continue
+    while IFS= read -r jsonl; do
+        [ -f "$jsonl" ] || continue
+        size_kb=$(( $(stat -c %s "$jsonl" 2>/dev/null || echo 0) / 1024 ))
+        if (( size_kb > TRIM_MAX_KB )); then
+            sid=$(basename "$jsonl" .jsonl)
+            log "$gw_name: sweep found $sid at ${size_kb}KB — trimming"
+            if python3 "$SCRIPT_DIR/trim.py" \
+                "$jsonl" "$sid" "$gw_name" "$STATE_FILE" \
+                "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" "$MIN_ARCHIVE_PAIRS" \
+                "$TRIM_FULL_THRESHOLD_PCT" "$TRIM_MAX_KB" 2>&1; then
+                log "$gw_name: sweep trim complete for $sid"
+            else
+                log "$gw_name: sweep trim FAILED for $sid (exit $?)"
+            fi
+            swept=$(( swept + 1 ))
+        fi
+    done < <(find "$sessions_dir" -maxdepth 1 -name "*.jsonl" \
+        ! -name "*.pre-trim.*" ! -name "*.reset.*" \
+        ! -name "*.deleted.*" ! -name "*.trajectory.*" \
+        2>/dev/null)
+done <<< "$GATEWAYS"
+
+(( swept > 0 )) && log "sweep complete: $swept file(s) trimmed"
+exit 0
