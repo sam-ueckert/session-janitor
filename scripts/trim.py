@@ -76,19 +76,17 @@ def main():
             tool_result_map[tcid] = e
 
     total_user = sum(1 for e in message_entries if e.get("message", {}).get("role") == "user")
-    if total_user < keep_pairs:
-        print(f"Only {total_user} user messages (need {keep_pairs}) — proceeding with shallow trim (keep all)")
 
+    # Always compute cut_index based on size only — no message-count gate.
+    # Walk backwards keeping last keep_pairs user messages; if fewer exist, keep all (cut_index=0).
     user_count = 0
-    cut_index = 0  # default: keep everything (shallow trim)
-    if total_user >= keep_pairs:
-        cut_index = len(message_entries)
-        for i in range(len(message_entries) - 1, -1, -1):
-            if message_entries[i].get("message", {}).get("role") == "user":
-                user_count += 1
-                if user_count >= keep_pairs:
-                    cut_index = i
-                    break
+    cut_index = 0  # default: keep everything (nothing to archive)
+    for i in range(len(message_entries) - 1, -1, -1):
+        if message_entries[i].get("message", {}).get("role") == "user":
+            user_count += 1
+            if user_count >= keep_pairs:
+                cut_index = i
+                break
 
     kept_messages = message_entries[cut_index:]
     archived_messages = message_entries[:cut_index]
@@ -125,10 +123,8 @@ def main():
         print(f"Would keep 0 messages — aborting trim")
         sys.exit(1)
 
-    # Note: min_archive_pairs no longer blocks trim — session always gets trimmed if oversized.
-    # (The check is kept as an informational log only.)
-    if len(archived_messages) < min_archive_pairs:
-        print(f"Only {len(archived_messages)} messages to archive — proceeding with shallow trim")
+    if cut_index == 0:
+        print(f"Session has {total_user} user messages (keep_pairs={keep_pairs}) — keeping all, collapsing old tool results")
 
     # Build topic summary for compaction entry
     user_topics = []

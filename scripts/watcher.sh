@@ -167,38 +167,10 @@ sys.exit(0 if '$sid' in active else 1)
         else
             log "$name: sidecar failed for $sid (exit $?) — continuing to trim"
         fi
-        # Recheck size after sidecar (it may have shrunk the file below threshold)
+        # Recheck size after sidecar (sidecar offloads blobs but does NOT archive message pairs)
+        # Always proceed to trim.py — sidecar is preprocessing, not a substitute for trim.
         size_kb=$(get_file_size_kb "$jsonl")
-        if (( size_kb <= TRIM_MAX_KB )); then
-            log "$name: $sid shrank to ${size_kb}KB after sidecar — skipping trim"
-            # Still ping gateway so it reloads the updated transcript
-            if [[ -n "$token" && -n "$port" && -n "$sessions_json" ]]; then
-                local session_key
-                session_key=$(python3 -c "
-import json
-d = json.load(open('$sessions_json'))
-for k, v in d.get('sessions', d).items():
-    if v.get('sessionId','') == '$sid':
-        print(k)
-        break
-" 2>/dev/null)
-                if [[ -n "$session_key" ]]; then
-                    if is_active_worker_session "$session_key"; then
-                        log "$name: skipping sidecar reload ping — active foreman worker session $session_key"
-                    elif [[ "$session_key" == *":direct:"* ]]; then
-                        curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
-                            -H "Authorization: Bearer $token" \
-                            -H "Content-Type: application/json" \
-                            -H "x-openclaw-session-key: $session_key" \
-                            -d '{"model":"openclaw","messages":[{"role":"user","content":"[tool outputs sidecared — acknowledge with NO_REPLY]"}]}' \
-                            >/dev/null 2>&1 && log "$name: gateway reload pinged after sidecar for $session_key" || true
-                    else
-                        log "$name: skipping sidecar reload ping for non-direct session $session_key"
-                    fi
-                fi
-            fi
-            return
-        fi
+        log "$name: $sid is ${size_kb}KB after sidecar — proceeding to trim"
     fi
 
     if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" "$MIN_ARCHIVE_PAIRS" "$TRIM_FULL_THRESHOLD_PCT" "$TRIM_MAX_KB" 2>&1; then
