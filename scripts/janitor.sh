@@ -161,12 +161,19 @@ if changed:
                             pre_trim_file=$(ls -t "${jsonl}.pre-trim."* 2>/dev/null | head -1)
                             if [[ -n "$pre_trim_file" ]]; then
                                 local llm_api_url="http://127.0.0.1:${LLM_PORT}"
-                                if python3 "$SCRIPTS_DIR/extract-llm.py" \
-                                    "$pre_trim_file" "$jsonl" "$sid" "$name" "$STATE_FILE" \
-                                    "$llm_api_url" "$LLM_TOKEN" "$MEM_ENABLED" "$MEM_PATH" \
-                                    "$SCENE_FILES_PATH" \
-                                    "$LLM_MODEL" "$LLM_MAX_INPUT_CHARS" "$LLM_TIMEOUT_SECS" \
-                                    "$LLM_MAX_MEMORIES" "$LLM_MIN_ARCHIVED" 2>&1; then
+                                if python3 "$SCRIPTS_DIR/extract.py" transcript \
+                                    "$pre_trim_file" --trimmed "$jsonl" \
+                                    --sid "$sid" \
+                                    --state "$STATE_FILE" \
+                                    --api-url "$llm_api_url" --api-token "$LLM_TOKEN" \
+                                    $([ "$MEM_ENABLED" = "true" ] && echo "--mem-enabled") \
+                                    --mem-path "$MEM_PATH" \
+                                    --scene-dir "$SCENE_FILES_PATH" \
+                                    --model "$LLM_MODEL" \
+                                    --max-chars "$LLM_MAX_INPUT_CHARS" \
+                                    --timeout "$LLM_TIMEOUT_SECS" \
+                                    --max-memories "$LLM_MAX_MEMORIES" \
+                                    --min-archived "$LLM_MIN_ARCHIVED" 2>&1; then
                                     log "$name: LLM extraction complete for $sid"
                                     LLM_EXTRACTIONS_THIS_RUN=$((LLM_EXTRACTIONS_THIS_RUN + 1))
                                 else
@@ -222,13 +229,19 @@ if to_del: json.dump(d, open(path, 'w'), indent=2)
             if [[ "$LLM_ENABLED" == "true" ]]; then
                 if (( LLM_EXTRACTIONS_THIS_RUN < LLM_MAX_PER_RUN )); then
                     local llm_api_url="http://127.0.0.1:${LLM_PORT}"
-                    if python3 "$SCRIPTS_DIR/extract-llm.py" \
-                        "$jsonl" "$jsonl" \
-                        "$sid" "$name" "$STATE_FILE" \
-                        "$llm_api_url" "$LLM_TOKEN" "$MEM_ENABLED" "$MEM_PATH" \
-                        "$SCENE_FILES_PATH" \
-                        "$LLM_MODEL" "$LLM_MAX_INPUT_CHARS" "$LLM_TIMEOUT_SECS" \
-                        "$LLM_MAX_MEMORIES" "$LLM_MIN_ARCHIVED" 2>&1; then
+                    if python3 "$SCRIPTS_DIR/extract.py" transcript \
+                        "$jsonl" \
+                        --sid "$sid" \
+                        --state "$STATE_FILE" \
+                        --api-url "$llm_api_url" --api-token "$LLM_TOKEN" \
+                        $([ "$MEM_ENABLED" = "true" ] && echo "--mem-enabled") \
+                        --mem-path "$MEM_PATH" \
+                        --scene-dir "$SCENE_FILES_PATH" \
+                        --model "$LLM_MODEL" \
+                        --max-chars "$LLM_MAX_INPUT_CHARS" \
+                        --timeout "$LLM_TIMEOUT_SECS" \
+                        --max-memories "$LLM_MAX_MEMORIES" \
+                        --min-archived "$LLM_MIN_ARCHIVED" 2>&1; then
                         log "$name: LLM extraction complete for orphan $sid"
                         LLM_EXTRACTIONS_THIS_RUN=$((LLM_EXTRACTIONS_THIS_RUN + 1))
                     else

@@ -26,6 +26,7 @@
   "staleCronSessionHours": 24,
   "llmExtraction": {
     "enabled": true,
+    "gateway": "slack",
     "maxPerRun": 5,
     "model": "openclaw",
     "maxInputChars": 20000,
