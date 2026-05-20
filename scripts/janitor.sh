@@ -217,6 +217,33 @@ if to_del: json.dump(d, open(path, 'w'), indent=2)
             if (( mod_min < ORPHAN_GRACE_MINUTES )); then
                 continue
             fi
+
+            # LLM extraction of orphan session before archiving
+            if [[ "$LLM_ENABLED" == "true" ]]; then
+                if (( LLM_EXTRACTIONS_THIS_RUN < LLM_MAX_PER_RUN )); then
+                    local llm_api_url="http://127.0.0.1:${LLM_PORT}"
+                    if python3 "$SCRIPTS_DIR/extract-llm.py" \
+                        "$jsonl" "$jsonl" \
+                        "$sid" "$name" "$STATE_FILE" \
+                        "$llm_api_url" "$LLM_TOKEN" "$MEM_ENABLED" "$MEM_PATH" \
+                        "$SCENE_FILES_PATH" \
+                        "$LLM_MODEL" "$LLM_MAX_INPUT_CHARS" "$LLM_TIMEOUT_SECS" \
+                        "$LLM_MAX_MEMORIES" "$LLM_MIN_ARCHIVED" 2>&1; then
+                        log "$name: LLM extraction complete for orphan $sid"
+                        LLM_EXTRACTIONS_THIS_RUN=$((LLM_EXTRACTIONS_THIS_RUN + 1))
+                    else
+                        local exit_code=$?
+                        if [[ $exit_code -eq 2 ]]; then
+                            log "ERROR: $name: LLM extraction FAILED for orphan $sid"
+                        else
+                            log "$name: LLM extraction skipped for orphan $sid (dedup/lock/insufficient)"
+                        fi
+                    fi
+                else
+                    log "WARNING: $name: LLM extraction RATE-LIMITED for orphan $sid (maxPerRun=${LLM_MAX_PER_RUN} reached)"
+                fi
+            fi
+
             mv "$jsonl" "${jsonl}.reset.$(date -u +%Y-%m-%dT%H-%M-%SZ)"
             orphan_count=$((orphan_count + 1))
         fi
