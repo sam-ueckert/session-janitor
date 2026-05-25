@@ -115,7 +115,7 @@ def call_llm(api_url, api_token, transcript_text, model=DEFAULT_MODEL, api_timeo
         "messages": [{"role": "user", "content": EXTRACTION_PROMPT + transcript_text}]
     }
     req = urllib.request.Request(
-        f"{api_url}/v1/chat/completions",
+        api_url,  # caller passes full URL (e.g. http://host:port/v1/chat/completions)
         data=json.dumps(payload).encode(),
         headers={"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
     )
