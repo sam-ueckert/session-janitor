@@ -158,6 +158,46 @@ sys.exit(0 if '$sid' in active else 1)
         fi
     fi
 
+    # Cache-ttl sentinel: only trim when OC has finished the current turn.
+    # OC writes custom/openclaw.cache-ttl as the last JSONL entry after every complete turn.
+    # If OC is still mid-turn or writing post-response cleanup, skip here — the next
+    # inotify close_write (when OC writes cache-ttl) will re-trigger fire_trim naturally.
+    local turn_state
+    turn_state=$(python3 - <<'PYEOF'
+import json, sys
+try:
+    entries = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+except Exception:
+    print('ok'); sys.exit(0)
+if not entries:
+    print('ok'); sys.exit(0)
+last = entries[-1]
+if last.get('type') == 'custom' and last.get('customType') == 'openclaw.cache-ttl':
+    print('ok'); sys.exit(0)
+last_msg = None
+for e in reversed(entries):
+    if e.get('type') == 'message':
+        last_msg = e
+        break
+if last_msg is None:
+    print('ok'); sys.exit(0)
+role = last_msg.get('message', {}).get('role', '') or last_msg.get('role', '')
+content = last_msg.get('message', {}).get('content', []) if 'message' in last_msg else last_msg.get('content', [])
+if isinstance(content, list):
+    for c in content:
+        if isinstance(c, dict) and c.get('type') in ('tool_result', 'tool_use'):
+            print('midturn'); sys.exit(0)
+if role == 'assistant':
+    print('pending'); sys.exit(0)
+print('ok')
+PYEOF
+        "$jsonl" 2>/dev/null)
+
+    if [[ "$turn_state" != "ok" ]]; then
+        log "$name: $sid is ${size_kb}KB but turn is '$turn_state' — skipping (next write will re-check)"
+        return
+    fi
+
     log "$name: $sid is ${size_kb}KB — trimming"
 
     # Run sidecar offloader first (before trim so trim sees smaller file)
