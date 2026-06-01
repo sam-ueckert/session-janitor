@@ -153,9 +153,10 @@ if changed:
                 # Mid-turn guard: skip trim if the last JSONL entry indicates an
                 # unresolved tool-use sequence (model is mid-flight). We check:
                 #   - last role is 'tool' (OC JSONL uses 'tool' for tool results)
-                #   - last role is 'user' AND last content block is type 'tool_result'
-                # If either is true, the assistant hasn't closed the turn yet — skip.
-                local midturn_check
+                #   - last content block is type 'tool_result' or 'tool_use'
+                # Stale safety: if the file hasn't been modified in >90s the agent
+                # died mid-turn — treat as abandoned and allow trim anyway.
+                local midturn_check file_age_secs
                 midturn_check=$(python3 - <<'PYEOF'
 import json, sys
 try:
@@ -177,8 +178,21 @@ print('ok')
 PYEOF
                 "$jsonl" 2>/dev/null)
                 if [[ "$midturn_check" == "midturn" ]]; then
-                    log "$name: session $sid is mid-turn (active tool use) — skipping trim, will retry next cycle"
-                    continue
+                    file_age_secs=$(( $(date +%s) - $(stat -c%Y "$jsonl" 2>/dev/null || echo 0) ))
+                    if (( file_age_secs < 90 )); then
+                        log "$name: session $sid is mid-turn (${file_age_secs}s since last write) — skipping trim, scheduling fast recheck"
+                        # Schedule a recheck in 30s if not already pending
+                        local recheck_flag="/tmp/janitor-recheck-${name}.flag"
+                        if [[ ! -f "$recheck_flag" ]] || (( $(date +%s) - $(stat -c%Y "$recheck_flag" 2>/dev/null || echo 0) > 35 )); then
+                            touch "$recheck_flag"
+                            local _logfile; _logfile=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('logFile','/tmp/session-janitor.log'))" 2>/dev/null || echo /tmp/session-janitor.log)
+                            ( sleep 30; rm -f "$recheck_flag"; bash "$SCRIPTS_DIR/janitor.sh" >> "$_logfile" 2>&1 ) &
+                            log "$name: fast recheck scheduled in 30s (pid $!)"
+                        fi
+                        continue
+                    else
+                        log "$name: session $sid mid-turn but stale (${file_age_secs}s, >90s threshold) — treating as abandoned, trimming"
+                    fi
                 fi
                 log "$name: active transcript $sid is ${size_kb}KB — trimming to last $KEEP_PAIRS pairs"
                 if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" "$MIN_ARCHIVE_PAIRS" "$TRIM_FULL_THRESHOLD_PCT" "$TRIM_MAX_KB" 2>&1; then
