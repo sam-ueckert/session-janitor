@@ -52,6 +52,35 @@ while IFS='|' read -r gw_name sessions_dir; do
         size_kb=$(( $(stat -c %s "$jsonl" 2>/dev/null || echo 0) / 1024 ))
         if (( size_kb > TRIM_MAX_KB )); then
             sid=$(basename "$jsonl" .jsonl)
+            # Mid-turn guard: skip if agent is actively processing tool calls
+            local_midturn=$(python3 - "$jsonl" <<'PYEOF'
+import json, sys
+try:
+    entries = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+except Exception:
+    print('ok'); sys.exit(0)
+if not entries:
+    print('ok'); sys.exit(0)
+last = entries[-1]
+if last.get('role') == 'tool':
+    print('midturn'); sys.exit(0)
+content = last.get('content', [])
+if isinstance(content, list):
+    for c in content:
+        if isinstance(c, dict) and c.get('type') in ('tool_result', 'tool_use'):
+            print('midturn'); sys.exit(0)
+print('ok')
+PYEOF
+)
+            if [[ "$local_midturn" == "midturn" ]]; then
+                file_age_secs=$(( $(date +%s) - $(stat -c%Y "$jsonl" 2>/dev/null || echo 0) ))
+                if (( file_age_secs < 90 )); then
+                    log "$gw_name: $sid is mid-turn (${file_age_secs}s) — skipping sweep trim"
+                    continue
+                else
+                    log "$gw_name: $sid mid-turn but stale (${file_age_secs}s) — treating as abandoned, trimming"
+                fi
+            fi
             log "$gw_name: sweep found $sid at ${size_kb}KB — trimming"
             if python3 "$SCRIPT_DIR/trim.py" \
                 "$jsonl" "$sid" "$gw_name" "$STATE_FILE" \
