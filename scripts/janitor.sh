@@ -218,7 +218,7 @@ print(count)
     # --- Pointer-orphan cleanup: sessions.json entries with no backing JSONL ---
     # These cause gateway errors on the next message to that session.
     local ptr_orphan_sids ptr_orphan_count=0
-    ptr_orphan_sids=$(python3 - <<'PYEOF'
+    ptr_orphan_sids=$(python3 - "$sessions_json" "$sessions_dir" <<'PYEOF'
 import json, os, sys, shutil
 path = sys.argv[1]
 sessions_dir = sys.argv[2]
@@ -244,7 +244,7 @@ if to_del:
         json.dump(d, f, indent=2)
     shutil.move(tmp, path)
 PYEOF
-        "$sessions_json" "$sessions_dir" 2>/dev/null)
+)
     if [[ -n "$ptr_orphan_sids" ]]; then
         while IFS= read -r ptr_sid; do
             [[ -z "$ptr_sid" ]] && continue
