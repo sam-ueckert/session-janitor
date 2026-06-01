@@ -193,6 +193,9 @@ if isinstance(content, list):
 # Last message is assistant but no cache-ttl yet — OC still writing cleanup
 if role == 'assistant':
     print('pending'); sys.exit(0)
+# Last message is user — OC received it and is waiting for model response
+if role == 'user':
+    print('midturn'); sys.exit(0)
 print('ok')
 PYEOF
                 "$jsonl" 2>/dev/null)
