@@ -1,0 +1,23 @@
+services:
+  oc-janitor-test:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+    image: oc-janitor-test:latest
+    container_name: oc-janitor-test
+    environment:
+      - OC_ANTHROPIC_KEY=${OC_ANTHROPIC_KEY:-}
+      - OC_TEST_TOKEN=janitor-test-token-abc123
+    ports:
+      - "18799:18799"
+    volumes:
+      # Mount plugin live for fast iteration without rebuilds
+      - ../plugin:/home/janitor/session-janitor/plugin:ro
+      # Mount scripts live too
+      - ../scripts:/home/janitor/session-janitor/scripts:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18799/api/v1/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s

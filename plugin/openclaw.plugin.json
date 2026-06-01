@@ -1,0 +1,22 @@
+{
+  "id": "session-janitor",
+  "name": "Session Janitor",
+  "version": "1.0.0",
+  "description": "Transcript hygiene plugin: sidecar blob offload + size-triggered trim via before_agent_finalize. Eliminates external watcher/cron-sweep timing races.",
+  "kind": "lifecycle",
+  "main": "./index.js",
+  "activation": {
+    "onCapabilities": ["hook"]
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "configPath": {
+        "type": "string",
+        "default": "",
+        "description": "Path to janitor config.json. Defaults to ../config.json relative to plugin dir."
+      }
+    },
+    "additionalProperties": false
+  }
+}

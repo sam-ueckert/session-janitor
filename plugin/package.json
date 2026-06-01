@@ -1,0 +1,9 @@
+{
+  "name": "openclaw-session-janitor",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Session transcript hygiene — in-process sidecar + trim at turn completion, eliminating external timing races",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.5.28"
+  },
+  "auth": {
+    "profiles": {
+      "anthropic:test": {
+        "provider": "anthropic",
+        "mode": "token"
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "anthropic/claude-haiku-4-5",
+        "fallbacks": []
+      },
+      "thinkingDefault": "off",
+      "contextTokens": 40000,
+      "timeoutSeconds": 60,
+      "maxConcurrent": 2,
+      "subagents": {
+        "maxConcurrent": 2
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "anthropic": {
+        "enabled": true
+      }
+    }
+  },
+  "gateway": {
+    "port": 18799,
+    "mode": "local",
+    "bind": "loopback",
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true
+        }
+      }
+    },
+    "auth": {
+      "mode": "token",
+      "token": "janitor-test-token-abc123",
+      "allowTailscale": false,
+      "rateLimit": {
+        "maxAttempts": 20,
+        "windowMs": 60000,
+        "lockoutMs": 60000,
+        "exemptLoopback": true
+      }
+    },
+    "trustedProxies": [
+      "127.0.0.1",
+      "::1"
+    ]
+  },
+  "session": {
+    "maintenance": {
+      "mode": "enforce",
+      "pruneAfter": "1d",
+      "maxEntries": 50
+    }
+  }
+}
