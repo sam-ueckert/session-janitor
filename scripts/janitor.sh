@@ -159,17 +159,26 @@ if changed:
                 local midturn_check file_age_secs
                 midturn_check=$(python3 - <<'PYEOF'
 import json, sys
+# OC JSONL format: {type, id, parentId, timestamp, message: {role, content}}
+# Top-level 'role' does NOT exist — must read entry['message']['role']
 try:
     entries = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 except Exception:
     print('ok'); sys.exit(0)
 if not entries:
     print('ok'); sys.exit(0)
-last = entries[-1]
-role = last.get('role', '')
+# Find last 'message' type entry
+last_msg = None
+for e in reversed(entries):
+    if e.get('type') == 'message':
+        last_msg = e.get('message', {})
+        break
+if last_msg is None:
+    print('ok'); sys.exit(0)
+role = last_msg.get('role', '')
 if role == 'tool':
     print('midturn'); sys.exit(0)
-content = last.get('content', [])
+content = last_msg.get('content', [])
 if isinstance(content, list):
     for c in content:
         if isinstance(c, dict) and c.get('type') in ('tool_result', 'tool_use'):
@@ -324,6 +333,35 @@ if count:
 print(count)
 " 2>/dev/null || echo 0)
     (( checkpoint_pruned > 0 )) && log "$name: pruned compaction checkpoints from $checkpoint_pruned session(s)"
+
+    # --- Pointer-orphan cleanup: sessions.json entries with no backing JSONL ---
+    # These cause gateway errors on the next message to that session.
+    local ptr_orphan_count
+    ptr_orphan_count=$(python3 - <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+sessions_dir = sys.argv[2]
+try:
+    d = json.load(open(path))
+except Exception:
+    print(0); sys.exit(0)
+sessions = d.get('sessions', d)
+to_del = []
+for key, v in sessions.items():
+    sid = v.get('sessionId', '')
+    if not sid:
+        continue
+    jsonl = os.path.join(sessions_dir, sid + '.jsonl')
+    if not os.path.exists(jsonl):
+        to_del.append(key)
+for key in to_del:
+    del sessions[key]
+if to_del:
+    json.dump(d, open(path, 'w'), indent=2)
+print(len(to_del))
+PYEOF
+        "$sessions_json" "$sessions_dir" 2>/dev/null || echo 0)
+    (( ptr_orphan_count > 0 )) && { log "$name: removed $ptr_orphan_count pointer-orphan session entries (no backing JSONL)"; changes=1; }
 
     # --- Prune stale session entries ---
     local pruned_count

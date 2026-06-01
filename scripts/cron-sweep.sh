@@ -55,16 +55,26 @@ while IFS='|' read -r gw_name sessions_dir; do
             # Mid-turn guard: skip if agent is actively processing tool calls
             local_midturn=$(python3 - "$jsonl" <<'PYEOF'
 import json, sys
+# OC JSONL format: {type, id, parentId, timestamp, message: {role, content}}
+# Top-level 'role' does NOT exist — must read entry['message']['role']
 try:
     entries = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 except Exception:
     print('ok'); sys.exit(0)
 if not entries:
     print('ok'); sys.exit(0)
-last = entries[-1]
-if last.get('role') == 'tool':
+# Find last 'message' type entry
+last_msg = None
+for e in reversed(entries):
+    if e.get('type') == 'message':
+        last_msg = e.get('message', {})
+        break
+if last_msg is None:
+    print('ok'); sys.exit(0)
+role = last_msg.get('role', '')
+if role == 'tool':
     print('midturn'); sys.exit(0)
-content = last.get('content', [])
+content = last_msg.get('content', [])
 if isinstance(content, list):
     for c in content:
         if isinstance(c, dict) and c.get('type') in ('tool_result', 'tool_use'):
