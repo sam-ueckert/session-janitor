@@ -150,6 +150,36 @@ if changed:
 
             # Trim if oversized
             if (( size_kb > TRIM_MAX_KB )); then
+                # Mid-turn guard: skip trim if the last JSONL entry indicates an
+                # unresolved tool-use sequence (model is mid-flight). We check:
+                #   - last role is 'tool' (OC JSONL uses 'tool' for tool results)
+                #   - last role is 'user' AND last content block is type 'tool_result'
+                # If either is true, the assistant hasn't closed the turn yet — skip.
+                local midturn_check
+                midturn_check=$(python3 - <<'PYEOF'
+import json, sys
+try:
+    entries = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+except Exception:
+    print('ok'); sys.exit(0)
+if not entries:
+    print('ok'); sys.exit(0)
+last = entries[-1]
+role = last.get('role', '')
+if role == 'tool':
+    print('midturn'); sys.exit(0)
+content = last.get('content', [])
+if isinstance(content, list):
+    for c in content:
+        if isinstance(c, dict) and c.get('type') in ('tool_result', 'tool_use'):
+            print('midturn'); sys.exit(0)
+print('ok')
+PYEOF
+                "$jsonl" 2>/dev/null)
+                if [[ "$midturn_check" == "midturn" ]]; then
+                    log "$name: session $sid is mid-turn (active tool use) — skipping trim, will retry next cycle"
+                    continue
+                fi
                 log "$name: active transcript $sid is ${size_kb}KB — trimming to last $KEEP_PAIRS pairs"
                 if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" "$MIN_ARCHIVE_PAIRS" "$TRIM_FULL_THRESHOLD_PCT" "$TRIM_MAX_KB" 2>&1; then
                     reset_count=$((reset_count + 1))
