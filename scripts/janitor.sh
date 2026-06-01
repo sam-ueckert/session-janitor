@@ -186,8 +186,8 @@ if isinstance(content, list):
 print('ok')
 PYEOF
                 "$jsonl" 2>/dev/null)
+                file_age_secs=$(( $(date +%s) - $(stat -c%Y "$jsonl" 2>/dev/null || echo 0) ))
                 if [[ "$midturn_check" == "midturn" ]]; then
-                    file_age_secs=$(( $(date +%s) - $(stat -c%Y "$jsonl" 2>/dev/null || echo 0) ))
                     if (( file_age_secs < 90 )); then
                         log "$name: session $sid is mid-turn (${file_age_secs}s since last write) — skipping trim, scheduling fast recheck"
                         # Schedule a recheck in 30s if not already pending
@@ -202,6 +202,12 @@ PYEOF
                     else
                         log "$name: session $sid mid-turn but stale (${file_age_secs}s, >90s threshold) — treating as abandoned, trimming"
                     fi
+                elif (( file_age_secs < 30 )); then
+                    # Not mid-turn but recently written — OC may still be doing post-response
+                    # cleanup writes (cache-ttl, acks). Trimming now causes
+                    # EmbeddedAttemptSessionTakeoverError. Defer until quiescent.
+                    log "$name: session $sid recently written (${file_age_secs}s) — deferring trim"
+                    continue
                 fi
                 log "$name: active transcript $sid is ${size_kb}KB — trimming to last $KEEP_PAIRS pairs"
                 if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" "$MIN_ARCHIVE_PAIRS" "$TRIM_FULL_THRESHOLD_PCT" "$TRIM_MAX_KB" 2>&1; then

@@ -82,14 +82,19 @@ if isinstance(content, list):
 print('ok')
 PYEOF
 )
+            file_age_secs=$(( $(date +%s) - $(stat -c%Y "$jsonl" 2>/dev/null || echo 0) ))
             if [[ "$local_midturn" == "midturn" ]]; then
-                file_age_secs=$(( $(date +%s) - $(stat -c%Y "$jsonl" 2>/dev/null || echo 0) ))
                 if (( file_age_secs < 90 )); then
                     log "$gw_name: $sid is mid-turn (${file_age_secs}s) — skipping sweep trim"
                     continue
                 else
                     log "$gw_name: $sid mid-turn but stale (${file_age_secs}s) — treating as abandoned, trimming"
                 fi
+            elif (( file_age_secs < 30 )); then
+                # Session recently written — OC may still be doing post-response cleanup writes.
+                # Trimming now causes EmbeddedAttemptSessionTakeoverError. Wait for quiescence.
+                log "$gw_name: $sid recently written (${file_age_secs}s) — deferring trim"
+                continue
             fi
             log "$gw_name: sweep found $sid at ${size_kb}KB — trimming"
             if python3 "$SCRIPT_DIR/trim.py" \
