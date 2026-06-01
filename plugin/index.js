@@ -2,33 +2,37 @@
  * OpenClaw Session Janitor Plugin
  *
  * Hooks:
- *   session_start / session_end  — track sessionKey → sessionId mapping
- *   before_agent_finalize        — sidecar + trim while OC holds the turn lock
- *   agent_end                    — async LLM extraction from archived content
+ *   session_start / session_end  — track sessionKey → {sessionId, transcriptPath}
+ *   before_agent_finalize        — record transcript path only (NO file writes)
+ *   agent_end                    — spawn detached sidecar+trim subprocess
+ *   gateway_start                — startup probe
  *
- * Eliminates the external watcher/cron-sweep sentinel approach. The
- * before_agent_finalize hook fires after the assistant response is written but
- * before cache-ttl, so there is no race window and no need to inspect file
- * content to determine turn state.
+ * WHY agent_end instead of before_agent_finalize for trim:
+ *   before_agent_finalize runs while OC still holds the session integrity check.
+ *   Calling trim.py there (which atomically renames the JSONL) causes OC to
+ *   detect "session file changed while embedded prompt lock was released" and
+ *   throw EmbeddedAttemptSessionTakeoverError.
+ *
+ *   agent_end fires AFTER OC has fully committed the turn and released the
+ *   session. We spawn trim-with-sidecar.sh as a detached process so it returns
+ *   immediately and the file write happens after OC is done.
  */
 
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ID = "session-janitor";
 
-// Per-session state tracked across hooks
-const sessionState = new Map(); // sessionKey → { sessionId, pendingPreTrimFile? }
+const sessionState = new Map(); // sessionKey → { sessionId, transcriptPath, gateway, pendingPreTrimFile? }
 
 export default {
   register(api) {
     const raw = api.logger ?? console;
     const info = (msg) => (raw.info ?? raw.log ?? console.log)(`[${PLUGIN_ID}] ${msg}`);
     const warn = (msg) => (raw.warn ?? console.warn)(`[${PLUGIN_ID}] ${msg}`);
-    const logErr = (msg) => (raw.error ?? console.error)(`[${PLUGIN_ID}] ${msg}`);
 
     // ── Config ────────────────────────────────────────────────────────────────
     const pluginRoot = api.rootDir ?? __dirname;
@@ -47,120 +51,87 @@ export default {
     const keepFullPairs = cfg.keepFullPairs ?? 2;
     const minArchivePairs = cfg.minArchivePairs ?? 5;
     const trimFullPct = cfg.trimFullThresholdPct ?? 50;
-    const stateFile = cfg.stateFile
-      ? cfg.stateFile.replace(/^~/, process.env.HOME ?? "~")
-      : path.join(process.env.HOME ?? "~", ".openclaw", "session-janitor-state.json");
+    const stateFile = (cfg.stateFile ?? "~/.openclaw/session-janitor-state.json")
+      .replace(/^~/, process.env.HOME ?? "~");
     const sidecarEnabled = cfg.sidecar?.enabled !== false;
     const sidecarMinBytes = cfg.sidecar?.minEntryBytes ?? 5120;
     const llmEnabled = Boolean(cfg.llmExtraction?.enabled);
     const llmGatewayName = cfg.llmExtraction?.gateway ?? "";
     const gateways = cfg.gateways ?? [];
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    function fileSizeKb(p) {
+      try { return Math.floor(fs.statSync(p).size / 1024); } catch { return 0; }
+    }
+
+    function sk(event, ctx) { return event?.sessionKey ?? ctx?.sessionKey ?? null; }
+    function sid(event, ctx) { return event?.sessionId ?? ctx?.sessionId ?? null; }
+
     function latestPreTrimFile(transcriptPath) {
       const dir = path.dirname(transcriptPath);
       const base = path.basename(transcriptPath);
       try {
-        return (
-          fs
-            .readdirSync(dir)
-            .filter((f) => f.startsWith(base + ".pre-trim."))
-            .map((f) => path.join(dir, f))
-            .sort()
-            .reverse()[0] ?? null
-        );
-      } catch {
-        return null;
-      }
-    }
-
-    function fileSizeKb(p) {
-      try {
-        return Math.floor(fs.statSync(p).size / 1024);
-      } catch {
-        return 0;
-      }
-    }
-
-    function sessionKey(event, ctx) {
-      return event?.sessionKey ?? ctx?.sessionKey ?? null;
-    }
-
-    function sessionId(event, ctx) {
-      return event?.sessionId ?? ctx?.sessionId ?? null;
+        return fs.readdirSync(dir)
+          .filter((f) => f.startsWith(base + ".pre-trim."))
+          .map((f) => path.join(dir, f))
+          .sort().reverse()[0] ?? null;
+      } catch { return null; }
     }
 
     // ── Hook: session_start ───────────────────────────────────────────────────
     api.on("session_start", (event, ctx) => {
-      const sk = sessionKey(event, ctx);
-      const sid = sessionId(event, ctx);
-      if (sk && sid) {
-        sessionState.set(sk, { sessionId: sid });
-      }
+      const key = sk(event, ctx);
+      const id = sid(event, ctx);
+      if (key && id) sessionState.set(key, { sessionId: id });
     });
 
     // ── Hook: session_end ─────────────────────────────────────────────────────
     api.on("session_end", (event, ctx) => {
-      const sk = sessionKey(event, ctx);
-      if (sk) sessionState.delete(sk);
+      const key = sk(event, ctx);
+      if (key) sessionState.delete(key);
     });
 
     // ── Hook: before_agent_finalize ───────────────────────────────────────────
-    // Fires after the assistant response is committed, before cache-ttl write.
-    // OC holds the session lock throughout, so there is no external race.
-    api.on(
-      "before_agent_finalize",
-      async (event, ctx) => {
-        const { transcriptPath, sessionId: sid, sessionKey: sk } = event;
+    // IMPORTANT: Do NOT call trim.py or sidecar.py here. Modifying the JSONL
+    // inside this hook causes EmbeddedAttemptSessionTakeoverError because OC
+    // checks file integrity after the hook returns.
+    // This hook only caches the transcript path for agent_end to use.
+    api.on("before_agent_finalize", (event, ctx) => {
+      const { transcriptPath, sessionId: id, sessionKey: key } = event;
+      if (!transcriptPath || !key || key.includes(":subagent:")) return;
+      const state = sessionState.get(key) ?? { sessionId: id };
+      state.transcriptPath = transcriptPath;
+      state.gateway = path.basename(
+        path.dirname(path.dirname(path.dirname(transcriptPath)))
+      );
+      sessionState.set(key, state);
+    });
 
-        if (!transcriptPath || !fs.existsSync(transcriptPath)) return;
+    // ── Hook: agent_end ───────────────────────────────────────────────────────
+    // OC has fully released the session after this fires. Spawn trim as a
+    // detached process so the file write happens after OC is clear.
+    api.on("agent_end", async (event, ctx) => {
+      if (!event.success) return;
 
-        // Skip subagent transcripts — they're short-lived and managed by OC
-        if (sk?.includes(":subagent:")) return;
+      const key = sk(event, ctx);
+      if (!key || key.includes(":subagent:")) return;
 
+      const state = sessionState.get(key);
+      const transcriptPath = state?.transcriptPath;
+
+      if (transcriptPath && fs.existsSync(transcriptPath)) {
         const sizeBefore = fileSizeKb(transcriptPath);
-        if (sizeBefore <= trimMaxKb) return;
+        if (sizeBefore > trimMaxKb) {
+          const id = state?.sessionId ?? path.basename(transcriptPath, ".jsonl");
+          const gateway = state?.gateway ?? "unknown";
+          info(`${id.slice(0, 8)}: ${sizeBefore}KB — spawning detached sidecar+trim`);
 
-        const shortId = (sid ?? path.basename(transcriptPath, ".jsonl")).slice(0, 8);
-        const gateway = path.basename(
-          path.dirname(path.dirname(path.dirname(transcriptPath))) // …/<name>/agents/main/sessions/<file>
-        );
-
-        info(`${shortId}: ${sizeBefore}KB > ${trimMaxKb}KB — sidecar + trim`);
-
-        // ── Step 1: sidecar ───────────────────────────────────────────────────
-        if (sidecarEnabled) {
-          try {
-            const out = execFileSync(
-              "python3",
-              [
-                path.join(scriptsDir, "sidecar.py"),
-                transcriptPath,
-                sid ?? path.basename(transcriptPath, ".jsonl"),
-                String(sidecarMinBytes),
-              ],
-              { encoding: "utf8", timeout: 30_000 }
-            );
-            if (out.trim()) info(`${shortId}: sidecar: ${out.trim().split("\n").pop()}`);
-          } catch (e) {
-            warn(`${shortId}: sidecar error: ${e.message?.split("\n")[0]}`);
-          }
-        }
-
-        const sizeAfterSidecar = fileSizeKb(transcriptPath);
-        if (sizeAfterSidecar <= trimMaxKb) {
-          info(`${shortId}: ${sizeAfterSidecar}KB after sidecar — under threshold, done`);
-          return;
-        }
-
-        // ── Step 2: trim ──────────────────────────────────────────────────────
-        try {
-          const out = execFileSync(
-            "python3",
+          // Detached: returns immediately; process runs after OC releases session
+          spawn(
+            "bash",
             [
-              path.join(scriptsDir, "trim.py"),
+              path.join(scriptsDir, "trim-with-sidecar.sh"),
               transcriptPath,
-              sid ?? path.basename(transcriptPath, ".jsonl"),
+              id,
               gateway,
               stateFile,
               String(keepPairs),
@@ -168,90 +139,56 @@ export default {
               String(minArchivePairs),
               String(trimFullPct),
               String(trimMaxKb),
+              String(sidecarEnabled ? sidecarMinBytes : 0),
             ],
-            { encoding: "utf8", timeout: 30_000 }
-          );
-          if (out.trim()) info(`${shortId}: trim: ${out.trim().split("\n").pop()}`);
-
-          const sizeAfterTrim = fileSizeKb(transcriptPath);
-          info(`${shortId}: done — ${sizeBefore}KB → ${sizeAfterTrim}KB`);
-
-          // Record pre-trim file for LLM extraction in agent_end
-          if (llmEnabled && sk) {
-            const preTrim = latestPreTrimFile(transcriptPath);
-            if (preTrim) {
-              const state = sessionState.get(sk) ?? { sessionId: sid };
-              state.pendingPreTrimFile = preTrim;
-              state.pendingTranscriptPath = transcriptPath;
-              state.pendingGateway = gateway;
-              sessionState.set(sk, state);
-            }
-          }
-        } catch (e) {
-          warn(`${shortId}: trim error: ${e.message?.split("\n")[0]}`);
+            { detached: true, stdio: "ignore" }
+          ).unref();
         }
-      },
-      { timeoutMs: 60_000 }
-    );
+      }
 
-    // ── Hook: agent_end ───────────────────────────────────────────────────────
-    // Fires after the turn is fully complete. Safe to fire async work here.
-    if (llmEnabled) {
-      api.on("agent_end", async (event, ctx) => {
-        if (!event.success) return;
-
-        const sk = sessionKey(event, ctx);
-        if (!sk) return;
-
-        const state = sessionState.get(sk);
-        if (!state?.pendingPreTrimFile) return;
-
-        const { pendingPreTrimFile, pendingTranscriptPath, pendingGateway, sessionId: sid } = state;
+      // LLM extraction from previous trim's pre-trim archive
+      if (llmEnabled && state?.pendingPreTrimFile) {
+        const { pendingPreTrimFile, pendingTranscriptPath, pendingGateway, sessionId: id } = state;
         delete state.pendingPreTrimFile;
         delete state.pendingTranscriptPath;
         delete state.pendingGateway;
 
-        const gwCfg =
-          gateways.find((g) => g.name === llmGatewayName) ?? gateways[0];
-        if (!gwCfg) return;
+        const gwCfg = gateways.find((g) => g.name === llmGatewayName) ?? gateways[0];
+        if (gwCfg) {
+          const llmApiUrl = `http://127.0.0.1:${gwCfg.port}`;
+          info(`${(id ?? "?").slice(0, 8)}: spawning async LLM extraction`);
+          spawn(
+            "python3",
+            [
+              path.join(scriptsDir, "extract-llm.py"),
+              pendingPreTrimFile,
+              pendingTranscriptPath ?? "",
+              id ?? "",
+              pendingGateway ?? gwCfg.name,
+              stateFile,
+              `${llmApiUrl}/v1/chat/completions`,
+              gwCfg.token ?? "",
+              "true",
+              cfg.llmExtraction?.memPath ?? "mem",
+              cfg.llmExtraction?.scene ?? "",
+              cfg.llmExtraction?.model ?? "openclaw",
+              String(cfg.llmExtraction?.maxInputChars ?? 20_000),
+              String(cfg.llmExtraction?.timeoutSecs ?? 60),
+              String(cfg.llmExtraction?.maxMemories ?? 15),
+              String(cfg.llmExtraction?.minArchived ?? 3),
+            ],
+            { detached: true, stdio: "ignore" }
+          ).unref();
+        }
+      }
+    });
 
-        const llmApiUrl = `http://127.0.0.1:${gwCfg.port}`;
-        const shortId = (sid ?? "unknown").slice(0, 8);
-        info(`${shortId}: launching async LLM extraction`);
-
-        spawn(
-          "python3",
-          [
-            path.join(scriptsDir, "extract-llm.py"),
-            pendingPreTrimFile,
-            pendingTranscriptPath ?? "",
-            sid ?? "",
-            pendingGateway ?? gwCfg.name,
-            stateFile,
-            `${llmApiUrl}/v1/chat/completions`,
-            gwCfg.token ?? "",
-            "true",
-            cfg.llmExtraction?.memPath ?? "mem",
-            cfg.llmExtraction?.scene ?? "",
-            cfg.llmExtraction?.model ?? "openclaw",
-            String(cfg.llmExtraction?.maxInputChars ?? 20_000),
-            String(cfg.llmExtraction?.timeoutSecs ?? 60),
-            String(cfg.llmExtraction?.maxMemories ?? 15),
-            String(cfg.llmExtraction?.minArchived ?? 3),
-          ],
-          { detached: true, stdio: "ignore" }
-        ).unref();
-      });
-    }
-
-    // gateway_start fires once at gateway startup — confirms plugin is active at runtime
-    api.on("gateway_start", (event, ctx) => {
-      info(`active on port ${event?.port ?? "?"} — hooks: ${hooks.join(", ")}`);
+    // ── Hook: gateway_start ───────────────────────────────────────────────────
+    api.on("gateway_start", (event) => {
+      info(`active on port ${event?.port ?? "?"} — hooks: session_start, session_end, before_agent_finalize, agent_end, gateway_start`);
       console.log(`[session-janitor] GATEWAY_START fired on port ${event?.port}`);
     });
 
-    const hooks = ["session_start", "session_end", "before_agent_finalize", "gateway_start"];
-    if (llmEnabled) hooks.push("agent_end");
-    info(`registered: ${hooks.join(", ")}`);
+    info(`registered: session_start, session_end, before_agent_finalize, agent_end, gateway_start`);
   },
 };
