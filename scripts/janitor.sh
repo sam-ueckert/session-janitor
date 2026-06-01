@@ -336,15 +336,15 @@ print(count)
 
     # --- Pointer-orphan cleanup: sessions.json entries with no backing JSONL ---
     # These cause gateway errors on the next message to that session.
-    local ptr_orphan_count
-    ptr_orphan_count=$(python3 - <<'PYEOF'
-import json, os, sys
+    local ptr_orphan_sids ptr_orphan_count=0
+    ptr_orphan_sids=$(python3 - <<'PYEOF'
+import json, os, sys, shutil
 path = sys.argv[1]
 sessions_dir = sys.argv[2]
 try:
     d = json.load(open(path))
 except Exception:
-    print(0); sys.exit(0)
+    sys.exit(0)
 sessions = d.get('sessions', d)
 to_del = []
 for key, v in sessions.items():
@@ -353,15 +353,25 @@ for key, v in sessions.items():
         continue
     jsonl = os.path.join(sessions_dir, sid + '.jsonl')
     if not os.path.exists(jsonl):
-        to_del.append(key)
-for key in to_del:
+        to_del.append((key, sid))
+for key, sid in to_del:
     del sessions[key]
+    print(sid)
 if to_del:
-    json.dump(d, open(path, 'w'), indent=2)
-print(len(to_del))
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(d, f, indent=2)
+    shutil.move(tmp, path)
 PYEOF
-        "$sessions_json" "$sessions_dir" 2>/dev/null || echo 0)
-    (( ptr_orphan_count > 0 )) && { log "$name: removed $ptr_orphan_count pointer-orphan session entries (no backing JSONL)"; changes=1; }
+        "$sessions_json" "$sessions_dir" 2>/dev/null)
+    if [[ -n "$ptr_orphan_sids" ]]; then
+        while IFS= read -r ptr_sid; do
+            [[ -z "$ptr_sid" ]] && continue
+            log "$name: removed pointer-orphan session entry: $ptr_sid (no backing JSONL)"
+            ptr_orphan_count=$((ptr_orphan_count + 1))
+        done <<< "$ptr_orphan_sids"
+        log "$name: total pointer-orphan entries removed: $ptr_orphan_count"
+    fi
 
     # --- Prune stale session entries ---
     local pruned_count
