@@ -22,6 +22,25 @@ fi
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [watcher] $*"; }
 
+# Check if a session_key belongs to an active foreman worker (skip reload to avoid aborting in-flight requests)
+ACTIVE_WORKERS_FILE="$HOME/repos/swabby-brain/memory/active-workers.json"
+is_active_worker_session() {
+    local sk="$1"
+    [[ -f "$ACTIVE_WORKERS_FILE" ]] || return 1
+    python3 -c "
+import json, sys
+sk = sys.argv[1]
+try:
+    d = json.load(open('$ACTIVE_WORKERS_FILE'))
+    for w in d.get('workers', []):
+        if w.get('session_key') == sk and w.get('status') in ('starting', 'running', 'blocked'):
+            sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+" "$sk" 2>/dev/null
+}
+
 # Load config values
 read_config_val() {
     python3 -c "
@@ -31,11 +50,24 @@ print(c.get('$1', '$2'))
 "
 }
 
+# Load extractOnTrim config (re-read each time for live config updates)
+read_extract_on_trim_val() {
+    python3 -c "
+import json, os
+c = json.load(open('$CONFIG_FILE'))
+print(c.get('extractOnTrim', {}).get('$1', '$2'))
+"
+}
+
 TRIM_MAX_KB=$(read_config_val trimMaxKB 250)
 KEEP_PAIRS=$(read_config_val keepPairs 10)
 KEEP_FULL_PAIRS=$(read_config_val keepFullPairs 2)
+MIN_ARCHIVE_PAIRS=$(read_config_val minArchivePairs 5)
+TRIM_FULL_THRESHOLD_PCT=$(read_config_val trimFullThresholdPct 50)
+DEBOUNCE_SECS=$(read_config_val watcherDebounceSecs 3)
 STATE_FILE=$(python3 -c "import json,os; c=json.load(open('$CONFIG_FILE')); print(os.path.expanduser(c.get('stateFile','~/.openclaw/session-janitor-state.json')))")
-DEBOUNCE_SECS=3
+SIDECAR_ENABLED=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(str(c.get('sidecar',{}).get('enabled',True)).lower())")
+SIDECAR_MIN_BYTES=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('sidecar',{}).get('minEntryBytes',5120))")
 
 # Build list of watch dirs + gateway metadata
 get_gateways() {
@@ -99,6 +131,7 @@ fire_trim() {
     [[ "$jsonl" == *".reset."* ]] && return
     [[ "$jsonl" == *".deleted."* ]] && return
     [[ "$jsonl" == *".pre-trim."* ]] && return
+    [[ "$jsonl" == *".trajectory."* ]] && return  # OpenClaw runtime telemetry, not a transcript
     [[ ! -f "$jsonl" ]] && return
 
     local size_kb
@@ -110,6 +143,7 @@ fire_trim() {
 
     local sid
     sid=$(basename "$jsonl" .jsonl)
+    sid="${sid%.trajectory}"  # Strip .trajectory suffix so UUID matches sessions.json
 
     # Verify it's an active session
     local sessions_json="$sessions_dir/sessions.json"
@@ -124,10 +158,91 @@ sys.exit(0 if '$sid' in active else 1)
         fi
     fi
 
+    # Cache-ttl sentinel: only trim when OC has finished the current turn.
+    # OC writes custom/openclaw.cache-ttl as the last JSONL entry after every complete turn.
+    # If OC is still mid-turn or writing post-response cleanup, skip here — the next
+    # inotify close_write (when OC writes cache-ttl) will re-trigger fire_trim naturally.
+    local turn_state
+    turn_state=$(python3 - <<'PYEOF'
+import json, sys
+try:
+    entries = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+except Exception:
+    print('ok'); sys.exit(0)
+if not entries:
+    print('ok'); sys.exit(0)
+last = entries[-1]
+if last.get('type') == 'custom' and last.get('customType') == 'openclaw.cache-ttl':
+    print('ok'); sys.exit(0)
+last_msg = None
+for e in reversed(entries):
+    if e.get('type') == 'message':
+        last_msg = e
+        break
+if last_msg is None:
+    print('ok'); sys.exit(0)
+role = last_msg.get('message', {}).get('role', '') or last_msg.get('role', '')
+content = last_msg.get('message', {}).get('content', []) if 'message' in last_msg else last_msg.get('content', [])
+if isinstance(content, list):
+    for c in content:
+        if isinstance(c, dict) and c.get('type') in ('tool_result', 'tool_use'):
+            print('midturn'); sys.exit(0)
+if role == 'assistant':
+    print('pending'); sys.exit(0)
+# Last message is user — OC received it and is waiting for model response
+if role == 'user':
+    print('midturn'); sys.exit(0)
+print('ok')
+PYEOF
+        "$jsonl" 2>/dev/null)
+
+    if [[ "$turn_state" != "ok" ]]; then
+        log "$name: $sid is ${size_kb}KB but turn is '$turn_state' — skipping (next write will re-check)"
+        return
+    fi
+
     log "$name: $sid is ${size_kb}KB — trimming"
 
-    if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" 2>&1; then
+    # Run sidecar offloader first (before trim so trim sees smaller file)
+    if [[ "$SIDECAR_ENABLED" == "true" ]]; then
+        if python3 "$SCRIPTS_DIR/sidecar.py" "$jsonl" "$sid" "$SIDECAR_MIN_BYTES" 2>&1 | while IFS= read -r line; do log "$name: [sidecar] $line"; done; then
+            : # sidecar ran (even if nothing was offloaded, exit 0)
+        else
+            log "$name: sidecar failed for $sid (exit $?) — continuing to trim"
+        fi
+        # Recheck size after sidecar (sidecar offloads blobs but does NOT archive message pairs)
+        # Always proceed to trim.py — sidecar is preprocessing, not a substitute for trim.
+        size_kb=$(get_file_size_kb "$jsonl")
+        log "$name: $sid is ${size_kb}KB after sidecar — proceeding to trim"
+    fi
+
+    if python3 "$SCRIPTS_DIR/trim.py" "$jsonl" "$sid" "$name" "$STATE_FILE" "$KEEP_PAIRS" "$KEEP_FULL_PAIRS" "$MIN_ARCHIVE_PAIRS" "$TRIM_FULL_THRESHOLD_PCT" "$TRIM_MAX_KB" 2>&1; then
         log "$name: trim complete for $sid"
+
+        # Async memory extraction from archived content (if enabled)
+        local extract_enabled
+        extract_enabled=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(str(c.get('extractOnTrim',{}).get('enabled',False)).lower())" 2>/dev/null)
+        if [[ "$extract_enabled" == "true" ]]; then
+            # Find the .pre-trim.* archive written by trim.py
+            local pre_trim_file
+            pre_trim_file=$(ls -t "${jsonl}.pre-trim."* 2>/dev/null | head -1)
+            if [[ -n "$pre_trim_file" ]]; then
+                local extract_scene extract_salience extract_min
+                extract_scene=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('extractOnTrim',{}).get('scene','auto'))" 2>/dev/null)
+                extract_salience=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('extractOnTrim',{}).get('salience',0.5))" 2>/dev/null)
+                extract_min=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('extractOnTrim',{}).get('minArchivedPairs',3))" 2>/dev/null)
+                local gw_url="http://127.0.0.1:${port}"
+                log "$name: firing async extract-llm for $sid (pre-trim: $pre_trim_file)"
+                python3 "$SCRIPTS_DIR/extract-llm.py" \
+                    "$pre_trim_file" "$jsonl" "$sid" "$gw_url" "$STATE_FILE" \
+                    "${gw_url}/v1/chat/completions" "$token" \
+                    "true" "mem" "$extract_scene" "openclaw" "20000" "60" "15" "$extract_min" \
+                    >> /tmp/janitor-extract.log 2>&1 &
+                log "$name: extract-llm launched async (pid $!)"
+            else
+                log "$name: extractOnTrim enabled but no pre-trim file found for $sid"
+            fi
+        fi
 
         # Ping gateway to reload
         if [[ -n "$token" && -n "$port" ]]; then
@@ -141,12 +256,20 @@ for k, v in d.get('sessions', d).items():
         break
 " 2>/dev/null)
             if [[ -n "$session_key" ]]; then
-                curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
-                    -H "Authorization: Bearer $token" \
-                    -H "Content-Type: application/json" \
-                    -H "x-openclaw-session-key: $session_key" \
-                    -d '{"model":"openclaw","messages":[{"role":"user","content":"[session trimmed by maintenance — acknowledge with NO_REPLY]"}]}' \
-                    >/dev/null 2>&1 && log "$name: gateway reload pinged for $session_key" || true
+                # Skip active foreman worker sessions — reload aborts in-flight API requests
+                # Root-caused 2026-05-02: janitor reload POST killed workers mid-turn
+                if is_active_worker_session "$session_key"; then
+                    log "$name: skipping reload ping — active foreman worker session $session_key (trim still applied on disk)"
+                elif [[ "$session_key" == *":direct:"* ]]; then
+                    curl -sS --max-time 10 "http://127.0.0.1:${port}/v1/chat/completions" \
+                        -H "Authorization: Bearer $token" \
+                        -H "Content-Type: application/json" \
+                        -H "x-openclaw-session-key: $session_key" \
+                        -d '{"model":"openclaw","messages":[{"role":"user","content":"[session trimmed by maintenance — acknowledge with NO_REPLY]"}]}' \
+                        >/dev/null 2>&1 && log "$name: gateway reload pinged for $session_key" || true
+                else
+                    log "$name: skipping reload ping for non-direct session $session_key (trim still applied on disk)"
+                fi
             fi
         fi
     else
@@ -182,11 +305,12 @@ start_watcher() {
 }
 
 start_watcher | while IFS= read -r filepath; do
-    # Only care about .jsonl files (not .pre-trim., .reset., etc.)
+    # Only care about .jsonl files (not .pre-trim., .reset., trajectory, etc.)
     [[ "$filepath" == *.jsonl ]] || continue
     [[ "$filepath" == *".pre-trim."* ]] && continue
     [[ "$filepath" == *".reset."* ]] && continue
     [[ "$filepath" == *".deleted."* ]] && continue
+    [[ "$filepath" == *".trajectory."* ]] && continue  # OpenClaw runtime telemetry, not a transcript
 
     PENDING["$filepath"]=$(date +%s)
 

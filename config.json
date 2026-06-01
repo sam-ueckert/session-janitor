@@ -1,0 +1,59 @@
+{
+  "gateways": [
+    {
+      "name": "discord",
+      "configDir": "/home/swabby/.openclaw-discord",
+      "sessionsDir": "/home/swabby/.openclaw-discord/agents/main/sessions",
+      "port": 18790,
+      "token": "aee524da0214f9a1616e00c1d769eba03721c9c7e79133cd"
+    },
+    {
+      "name": "slack",
+      "configDir": "/home/swabby/.openclaw-slack",
+      "sessionsDir": "/home/swabby/.openclaw-slack/agents/main/sessions",
+      "port": 18789,
+      "token": "aee524da0214f9a1616e00c1d769eba03721c9c7e79133cd"
+    }
+  ],
+  "trimMaxKB": 250,
+  "keepPairs": 8,
+  "keepFullPairs": 4,
+  "minArchivePairs": 5,
+  "trimFullThresholdPct": 50,
+  "archiveRetentionDays": 7,
+  "orphanGraceMinutes": 30,
+  "staleSubagentHours": 24,
+  "staleCronSessionHours": 24,
+  "llmExtraction": {
+    "enabled": true,
+    "gateway": "slack",
+    "maxPerRun": 5,
+    "model": "openclaw",
+    "maxInputChars": 20000,
+    "timeoutSecs": 60,
+    "maxMemories": 15,
+    "minArchived": 3
+  },
+  "memCli": {
+    "enabled": true,
+    "path": "/home/swabby/bin/mem"
+  },
+  "sceneFilesPath": "/home/swabby/repos/swabby-brain/memory/private",
+  "stateFile": "/home/swabby/.openclaw/session-janitor-state.json",
+  "sidecar": {
+    "enabled": true,
+    "minEntryBytes": 5120
+  },
+  "watcherDebounceSecs": 3,
+  "extractOnTrim": {
+    "enabled": true,
+    "minArchivedPairs": 3,
+    "scene": "auto",
+    "salience": 0.6
+  },
+  "watchdog": {
+    "enabled": false
+  },
+  "cronSchedule": "disabled",
+  "logFile": "/tmp/session-janitor.log"
+}
