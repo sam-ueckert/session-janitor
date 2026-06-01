@@ -56,14 +56,21 @@ while IFS='|' read -r gw_name sessions_dir; do
             local_midturn=$(python3 - "$jsonl" <<'PYEOF'
 import json, sys
 # OC JSONL format: {type, id, parentId, timestamp, message: {role, content}}
-# Top-level 'role' does NOT exist — must read entry['message']['role']
+# Sentinel: OC writes custom/openclaw.cache-ttl as the FINAL entry after every
+# complete turn. If last entry is cache-ttl, OC is done — safe to trim.
+# If last entry is a message (assistant), OC may still be writing cache-ttl.
+# If last message role is tool/user, we are mid-turn.
 try:
     entries = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 except Exception:
     print('ok'); sys.exit(0)
 if not entries:
     print('ok'); sys.exit(0)
-# Find last 'message' type entry
+last = entries[-1]
+# Best case: cache-ttl sentinel present — turn is complete
+if last.get('type') == 'custom' and last.get('customType') == 'openclaw.cache-ttl':
+    print('ok'); sys.exit(0)
+# Find last message-type entry
 last_msg = None
 for e in reversed(entries):
     if e.get('type') == 'message':
@@ -79,6 +86,9 @@ if isinstance(content, list):
     for c in content:
         if isinstance(c, dict) and c.get('type') in ('tool_result', 'tool_use'):
             print('midturn'); sys.exit(0)
+# Last message is assistant but no cache-ttl yet — OC still writing cleanup
+if role == 'assistant':
+    print('pending'); sys.exit(0)
 print('ok')
 PYEOF
 )
@@ -90,12 +100,17 @@ PYEOF
                 else
                     log "$gw_name: $sid mid-turn but stale (${file_age_secs}s) — treating as abandoned, trimming"
                 fi
-            elif (( file_age_secs < 30 )); then
-                # Session recently written — OC may still be doing post-response cleanup writes.
-                # Trimming now causes EmbeddedAttemptSessionTakeoverError. Wait for quiescence.
-                log "$gw_name: $sid recently written (${file_age_secs}s) — deferring trim"
-                continue
+            elif [[ "$local_midturn" == "pending" ]]; then
+                # Last message is assistant but cache-ttl not yet written.
+                # OC is still in post-response cleanup. Defer unless stale.
+                if (( file_age_secs < 5 )); then
+                    log "$gw_name: $sid pending cache-ttl (${file_age_secs}s) — deferring trim"
+                    continue
+                else
+                    log "$gw_name: $sid pending cache-ttl but stale (${file_age_secs}s) — trimming"
+                fi
             fi
+            # local_midturn == 'ok': cache-ttl sentinel seen, safe to trim immediately
             log "$gw_name: sweep found $sid at ${size_kb}KB — trimming"
             if python3 "$SCRIPT_DIR/trim.py" \
                 "$jsonl" "$sid" "$gw_name" "$STATE_FILE" \
