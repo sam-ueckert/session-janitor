@@ -68,7 +68,7 @@ SCENE_FILE_MAP = {
     "config": "scene-config.md", "gateway": "scene-config.md",
     "openclaw": "scene-config.md", "configuration": "scene-config.md",
     "projects": "scene-projects.md", "project": "scene-projects.md",
-    "cyrano": "scene-projects.md", "groomer": "scene-projects.md",
+    "cyrano": "scene-projects.md",
     "archy": "scene-projects.md", "foreman": "scene-projects.md",
     "lessons": "scene-lessons.md", "lesson": "scene-lessons.md",
     "commodore": "scene-commodore.md", "personal": "scene-commodore.md",

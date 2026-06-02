@@ -160,7 +160,7 @@ SCENE_FILE_MAP = {
     "projects": "scene-projects.md",
     "project": "scene-projects.md",
     "cyrano": "scene-projects.md",
-    "groomer": "scene-projects.md",
+
     "archy": "scene-projects.md",
     "lessons": "scene-lessons.md",
     "lesson": "scene-lessons.md",
