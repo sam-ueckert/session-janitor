@@ -60,6 +60,8 @@ print(c.get('extractOnTrim', {}).get('$1', '$2'))
 }
 
 TRIM_MAX_KB=$(read_config_val trimMaxKB 250)
+TRIM_FORCE_KB=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('trimForceKB', int(c.get('trimMaxKB', 250) * 2)))" 2>/dev/null || echo $(( TRIM_MAX_KB * 2 )))
+FORCE_TRIM_STALE_MINS=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('forceTrimStaleMins', 30))" 2>/dev/null || echo 30)
 KEEP_PAIRS=$(read_config_val keepPairs 10)
 KEEP_FULL_PAIRS=$(read_config_val keepFullPairs 2)
 MIN_ARCHIVE_PAIRS=$(read_config_val minArchivePairs 5)
@@ -197,8 +199,23 @@ PYEOF
         "$jsonl" 2>/dev/null)
 
     if [[ "$turn_state" != "ok" ]]; then
-        log "$name: $sid is ${size_kb}KB but turn is '$turn_state' — skipping (next write will re-check)"
-        return
+        # Force-trim override: if file is over hard ceiling AND stale (no writes in N min), trim anyway.
+        # Prevents permanent skip when a session is stuck mid-turn (e.g. gateway timeouts).
+        local force_trim=false
+        if (( size_kb >= TRIM_FORCE_KB )); then
+            local mtime_secs now_secs stale_secs
+            mtime_secs=$(stat -c %Y "$jsonl" 2>/dev/null || echo 0)
+            now_secs=$(date +%s)
+            stale_secs=$(( (now_secs - mtime_secs) ))
+            if (( stale_secs >= FORCE_TRIM_STALE_MINS * 60 )); then
+                log "$name: $sid is ${size_kb}KB (>= force ${TRIM_FORCE_KB}KB) and stale ${stale_secs}s — force-trimming despite turn='$turn_state'"
+                force_trim=true
+            fi
+        fi
+        if [[ "$force_trim" != "true" ]]; then
+            log "$name: $sid is ${size_kb}KB but turn is '$turn_state' — skipping (next write will re-check)"
+            return
+        fi
     fi
 
     log "$name: $sid is ${size_kb}KB — trimming"
