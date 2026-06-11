@@ -108,7 +108,7 @@ log "Watching ${#WATCH_DIRS[@]} session dir(s): ${WATCH_DIRS[*]}"
 log "Threshold: ${TRIM_MAX_KB}KB | Debounce: ${DEBOUNCE_SECS}s | Keep pairs: ${KEEP_PAIRS} | Keep full pairs: ${KEEP_FULL_PAIRS}"
 
 # Pending file => timestamp of last event
-declare -A PENDING
+# declare -A PENDING  # removed — replaced by polling loop
 
 # Portable file size in KB (GNU stat -c vs BSD stat -f)
 get_file_size_kb() {
@@ -294,43 +294,37 @@ for k, v in d.get('sessions', d).items():
     fi
 }
 
-# Main loop: inotifywait feeds events, we debounce and fire
-process_pending() {
-    local now
+# Polling loop — runs entirely in the main process (no subshell/IPC issues).
+# Scans all watch dirs every POLL_SECS and fires fire_trim for oversized files.
+# Cooldown prevents re-firing the same file within COOLDOWN_SECS of last trim.
+# The plugin (agent_end hook) is the primary trim trigger; this is belt-and-suspenders.
+POLL_SECS=${DEBOUNCE_SECS:-5}
+COOLDOWN_SECS=60
+
+declare -A LAST_FIRED  # filepath -> epoch when fire_trim was last called
+
+log "Starting poll loop (interval: ${POLL_SECS}s, cooldown: ${COOLDOWN_SECS}s)"
+
+while true; do
+    sleep "$POLL_SECS"
     now=$(date +%s)
-    for jsonl in "${!PENDING[@]}"; do
-        local ts="${PENDING[$jsonl]}"
-        if (( now - ts >= DEBOUNCE_SECS )); then
-            unset "PENDING[$jsonl]"
+    for sd in "${WATCH_DIRS[@]}"; do
+        for jsonl in "$sd"/*.jsonl; do
+            [[ -f "$jsonl" ]] || continue
+            [[ "$jsonl" == *".pre-trim."* ]] && continue
+            [[ "$jsonl" == *".reset."* ]] && continue
+            [[ "$jsonl" == *".deleted."* ]] && continue
+            [[ "$jsonl" == *".trajectory."* ]] && continue
+
+            sz=$(get_file_size_kb "$jsonl")
+            (( sz > TRIM_MAX_KB )) || continue
+
+            # Cooldown: skip if we fired recently for this file
+            last="${LAST_FIRED[$jsonl]:-0}"
+            (( now - last < COOLDOWN_SECS )) && continue
+
+            LAST_FIRED["$jsonl"]=$now
             fire_trim "$jsonl" &
-        fi
+        done
     done
-}
-
-# OS-specific file watcher — outputs one absolute path per line
-start_watcher() {
-    if [[ "$OS" == "Darwin" ]]; then
-        if ! command -v fswatch &>/dev/null; then
-            log "ERROR: fswatch not found — install with: brew install fswatch"
-            exit 1
-        fi
-        # FSEvents backend: Updated covers writes, MovedTo covers atomic renames
-        fswatch --event Updated --event MovedTo --latency 1 "${WATCH_DIRS[@]}"
-    else
-        inotifywait -m -e close_write,moved_to --format '%w%f' "${WATCH_DIRS[@]}" 2>/dev/null
-    fi
-}
-
-start_watcher | while IFS= read -r filepath; do
-    # Only care about .jsonl files (not .pre-trim., .reset., trajectory, etc.)
-    [[ "$filepath" == *.jsonl ]] || continue
-    [[ "$filepath" == *".pre-trim."* ]] && continue
-    [[ "$filepath" == *".reset."* ]] && continue
-    [[ "$filepath" == *".deleted."* ]] && continue
-    [[ "$filepath" == *".trajectory."* ]] && continue  # OpenClaw runtime telemetry, not a transcript
-
-    PENDING["$filepath"]=$(date +%s)
-
-    # Check if any pending items are ready to fire
-    process_pending
 done
