@@ -43,6 +43,18 @@
   // Seconds to wait after a file-change event before firing a trim (watcher mode only).
   // Debounce prevents redundant trims during rapid sequential writes.
   "watcherDebounceSecs": 3,
+  // Long-term memory backend. Controls where extracted memories are stored after trim.
+  // type: "archy"      — Archy mem CLI (mem quick-store). Requires mem in PATH or memCli.path.
+  //       "webhook"    — POST each memory as JSON to webhookUrl. Works with any HTTP endpoint.
+  //       "scene-only" — Write to git-backed scene markdown files only (no external system).
+  //       "none"       — No storage (extraction still runs; memories are logged but discarded).
+  // Scene files are always written when sceneFilesPath is set, except when type is "none".
+  "memBackend": {
+    "type": "scene-only",
+    "webhookUrl": "",
+    "webhookHeaders": {}
+  },
+  // Legacy Archy CLI config — used when memBackend.type is "archy".
   "memCli": {
     "enabled": false,
     "path": "mem"

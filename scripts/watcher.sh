@@ -70,6 +70,11 @@ DEBOUNCE_SECS=$(read_config_val watcherDebounceSecs 3)
 STATE_FILE=$(python3 -c "import json,os; c=json.load(open('$CONFIG_FILE')); print(os.path.expanduser(c.get('stateFile','~/.openclaw/session-janitor-state.json')))")
 SIDECAR_ENABLED=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(str(c.get('sidecar',{}).get('enabled',True)).lower())")
 SIDECAR_MIN_BYTES=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('sidecar',{}).get('minEntryBytes',5120))")
+MEM_ENABLED=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(str(c.get('memCli',{}).get('enabled',False)).lower())")
+MEM_PATH=$(python3 -c "import json,os; c=json.load(open('$CONFIG_FILE')); print(os.path.expanduser(c.get('memCli',{}).get('path','mem')))")
+MEM_BACKEND_TYPE=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('memBackend',{}).get('type',''))")
+MEM_BACKEND_WEBHOOK_URL=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('memBackend',{}).get('webhookUrl',''))")
+MEM_BACKEND_WEBHOOK_HEADERS=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(json.dumps(c.get('memBackend',{}).get('webhookHeaders',{})))")
 
 # Build list of watch dirs + gateway metadata
 get_gateways() {
@@ -253,7 +258,8 @@ PYEOF
                 python3 "$SCRIPTS_DIR/extract-llm.py" \
                     "$pre_trim_file" "$jsonl" "$sid" "$gw_url" "$STATE_FILE" \
                     "${gw_url}/v1/chat/completions" "$token" \
-                    "true" "mem" "$extract_scene" "openclaw" "20000" "60" "15" "$extract_min" \
+                    "$MEM_ENABLED" "$MEM_PATH" "$extract_scene" "openclaw" "20000" "60" "15" "$extract_min" \
+                    "$MEM_BACKEND_TYPE" "$MEM_BACKEND_WEBHOOK_URL" "$MEM_BACKEND_WEBHOOK_HEADERS" \
                     >> /tmp/janitor-extract.log 2>&1 &
                 log "$name: extract-llm launched async (pid $!)"
             else

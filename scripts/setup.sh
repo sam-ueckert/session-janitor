@@ -81,9 +81,60 @@ elif [[ -x "$HOME/.npm-global/bin/mem" ]]; then
     mem_path="$HOME/.npm-global/bin/mem"
     echo "✓ mem CLI found at $mem_path"
 else
-    echo "ℹ mem CLI not found — LLM extraction will skip structured memory storage"
-    echo "  (Memories will still be extracted, just not stored in a searchable DB)"
+    echo "ℹ mem CLI not found — Archy backend not available"
 fi
+
+# --- Memory backend selection ---
+echo ""
+echo "Memory extraction after trim:"
+echo "  1) Archy (mem CLI)$([ "$mem_available" == true ] && echo " [found: $mem_path]" || echo " [mem CLI not found]")"
+echo "  2) Generic HTTP webhook (POST each memory as JSON to a URL)"
+echo "  3) Scene files only (no external system — git-backed markdown files)"
+echo "  4) Disabled (no extraction)"
+echo ""
+
+default_mem_choice=3
+[[ "$mem_available" == true ]] && default_mem_choice=1
+
+read -r -p "Choice [default: $default_mem_choice]: " mem_choice
+mem_choice="${mem_choice:-$default_mem_choice}"
+
+mem_backend_type="scene-only"
+webhook_url=""
+webhook_headers_json="{}"
+
+case "$mem_choice" in
+  1)
+    if [[ "$mem_available" == true ]]; then
+        mem_backend_type="archy"
+        echo "  ✓ Archy backend selected ($mem_path)"
+    else
+        echo "  ⚠ mem CLI not found — falling back to scene-only"
+        mem_backend_type="scene-only"
+    fi
+    ;;
+  2)
+    mem_backend_type="webhook"
+    read -r -p "  Webhook URL: " webhook_url
+    read -r -p "  Authorization header value (leave blank for none): " webhook_auth
+    if [[ -n "$webhook_auth" ]]; then
+        webhook_headers_json="{\"Authorization\": \"$webhook_auth\"}"
+    fi
+    echo "  ✓ Webhook backend selected ($webhook_url)"
+    ;;
+  3)
+    mem_backend_type="scene-only"
+    echo "  ✓ Scene files only"
+    ;;
+  4)
+    mem_backend_type="none"
+    echo "  ✓ Memory extraction disabled"
+    ;;
+  *)
+    echo "  ⚠ Invalid choice — defaulting to scene-only"
+    mem_backend_type="scene-only"
+    ;;
+esac
 
 # --- Check for Python 3 ---
 if ! command -v python3 &>/dev/null; then
@@ -115,11 +166,19 @@ fi
 echo ""
 echo "Generating config.json..."
 
-python3 - "$CONFIG_FILE" "${gateways[@]}" <<'PYEOF'
+python3 - "$CONFIG_FILE" "$mem_backend_type" "$mem_path" "$webhook_url" "$webhook_headers_json" "${gateways[@]}" <<'PYEOF'
 import json, sys, os, subprocess
 
 config_file = sys.argv[1]
-gateway_names = sys.argv[2:]
+mem_backend_type = sys.argv[2]
+mem_cli_path = sys.argv[3]
+webhook_url = sys.argv[4]
+webhook_headers_json = sys.argv[5]
+gateway_names = sys.argv[6:]
+try:
+    webhook_headers = json.loads(webhook_headers_json)
+except Exception:
+    webhook_headers = {}
 
 gateways = []
 for name in gateway_names:
@@ -148,17 +207,6 @@ for name in gateway_names:
         "token": token,
     })
 
-# Check for mem
-mem_path = ""
-for candidate in [
-    subprocess.run(["which", "mem"], capture_output=True, text=True).stdout.strip(),
-    os.path.expanduser("~/bin/mem"),
-    os.path.expanduser("~/.npm-global/bin/mem"),
-]:
-    if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-        mem_path = candidate
-        break
-
 config = {
     "gateways": gateways,
     "trimMaxKB": 250,
@@ -171,7 +219,7 @@ config = {
     "staleSubagentHours": 24,
     "staleCronSessionHours": 24,
     "llmExtraction": {
-        "enabled": True,
+        "enabled": mem_backend_type != "none",
         "maxPerRun": 1,
         "model": "openclaw",
         "maxInputChars": 20000,
@@ -179,9 +227,14 @@ config = {
         "maxMemories": 15,
         "minArchived": 3,
     },
+    "memBackend": {
+        "type": mem_backend_type,
+        **({"webhookUrl": webhook_url, "webhookHeaders": webhook_headers}
+           if mem_backend_type == "webhook" else {}),
+    },
     "memCli": {
-        "enabled": bool(mem_path),
-        "path": mem_path,
+        "enabled": mem_backend_type == "archy" and bool(mem_cli_path),
+        "path": mem_cli_path or "mem",
     },
     "stateFile": os.path.expanduser("~/.openclaw/session-janitor-state.json"),
     "watcherDebounceSecs": 3,

@@ -41,6 +41,9 @@ vals = {
     'LLM_MIN_ARCHIVED': c.get('llmExtraction',{}).get('minArchived', 3),
     'MEM_ENABLED': str(c.get('memCli',{}).get('enabled', False)).lower(),
     'MEM_PATH': c.get('memCli',{}).get('path', 'mem'),
+    'MEM_BACKEND_TYPE': c.get('memBackend',{}).get('type',''),
+    'MEM_BACKEND_WEBHOOK_URL': c.get('memBackend',{}).get('webhookUrl',''),
+    'MEM_BACKEND_WEBHOOK_HEADERS': json.dumps(c.get('memBackend',{}).get('webhookHeaders',{})),
     'SCENE_FILES_PATH': os.path.expanduser(c.get('sceneFilesPath', '')),
     'STATE_FILE': os.path.expanduser(c.get('stateFile', '~/.openclaw/session-janitor-state.json')),
     'GATEWAY_COUNT': len(c.get('gateways', [])),
@@ -170,6 +173,9 @@ if changed:
                         --api-url "$llm_api_url" --api-token "$LLM_TOKEN" \
                         $([ "$MEM_ENABLED" = "true" ] && echo "--mem-enabled") \
                         --mem-path "$MEM_PATH" \
+                        --mem-backend "$MEM_BACKEND_TYPE" \
+                        --webhook-url "$MEM_BACKEND_WEBHOOK_URL" \
+                        --webhook-headers-json "$MEM_BACKEND_WEBHOOK_HEADERS" \
                         --scene-dir "$SCENE_FILES_PATH" \
                         --model "$LLM_MODEL" \
                         --max-chars "$LLM_MAX_INPUT_CHARS" \

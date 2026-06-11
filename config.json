@@ -34,6 +34,9 @@
     "maxMemories": 15,
     "minArchived": 3
   },
+  "memBackend": {
+    "type": "archy"
+  },
   "memCli": {
     "enabled": true,
     "path": "/home/swabby/bin/mem"

@@ -58,6 +58,11 @@ export default {
     const llmEnabled = Boolean(cfg.llmExtraction?.enabled);
     const llmGatewayName = cfg.llmExtraction?.gateway ?? "";
     const gateways = cfg.gateways ?? [];
+    const memCliPath = (cfg.memCli?.path ?? cfg.llmExtraction?.memPath ?? "mem")
+      .replace(/^~/, process.env.HOME ?? "~");
+    const memBackendType = cfg.memBackend?.type ?? (cfg.memCli?.enabled ? "archy" : "scene-only");
+    const memBackendWebhookUrl = cfg.memBackend?.webhookUrl ?? "";
+    const memBackendWebhookHeaders = JSON.stringify(cfg.memBackend?.webhookHeaders ?? {});
 
     function fileSizeKb(p) {
       try { return Math.floor(fs.statSync(p).size / 1024); } catch { return 0; }
@@ -144,9 +149,12 @@ export default {
       const state = sessionState.get(key) ?? { sessionId: id };
       if (transcriptPath) {
         state.transcriptPath = transcriptPath;
-        state.gateway = path.basename(
-          path.dirname(path.dirname(path.dirname(transcriptPath)))
+        const sessDir = path.dirname(transcriptPath);
+        const matchedGw = gateways.find(
+          (g) => g.sessionsDir && path.resolve(sessDir) === path.resolve(g.sessionsDir)
         );
+        state.gateway = matchedGw?.name
+          ?? path.basename(path.dirname(path.dirname(path.dirname(transcriptPath))));
       }
       if (id) state.sessionId = id;
       sessionState.set(key, state);
@@ -171,9 +179,12 @@ export default {
           transcriptPath = resolved;
           const st = sessionState.get(key) ?? { sessionId: id };
           st.transcriptPath = resolved;
-          st.gateway = path.basename(
-            path.dirname(path.dirname(path.dirname(resolved)))
+          const resolvedSessDir = path.dirname(resolved);
+          const resolvedGw = gateways.find(
+            (g) => g.sessionsDir && path.resolve(resolvedSessDir) === path.resolve(g.sessionsDir)
           );
+          st.gateway = resolvedGw?.name
+            ?? path.basename(path.dirname(path.dirname(path.dirname(resolved))));
           if (id) st.sessionId = id;
           sessionState.set(key, st);
         }
@@ -231,14 +242,17 @@ export default {
               stateFile,
               `${llmApiUrl}/v1/chat/completions`,
               gwCfg.token ?? "",
-              "true",
-              cfg.llmExtraction?.memPath ?? "mem",
+              String(cfg.memCli?.enabled !== false && memBackendType === "archy"),
+              memCliPath,
               cfg.llmExtraction?.scene ?? "",
               cfg.llmExtraction?.model ?? "openclaw",
               String(cfg.llmExtraction?.maxInputChars ?? 20_000),
               String(cfg.llmExtraction?.timeoutSecs ?? 60),
               String(cfg.llmExtraction?.maxMemories ?? 15),
               String(cfg.llmExtraction?.minArchived ?? 3),
+              memBackendType,
+              memBackendWebhookUrl,
+              memBackendWebhookHeaders,
             ],
             { detached: true, stdio: "ignore" }
           ).unref();

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """LLM-powered extraction of archived transcript content into structured memory.
 
-Usage: extract-llm.py <pre_trim> <trimmed> <sid> <gateway> <state_file> <api_url> <api_token> <mem_enabled> <mem_path>
+Usage: extract-llm.py <pre_trim> <trimmed> <sid> <gateway> <state_file> <api_url> <api_token>
+         [mem_enabled] [mem_path] [scene_dir] [model] [max_chars] [timeout] [max_memories]
+         [min_archived] [backend_type] [webhook_url] [webhook_headers_json]
+
+backend_type: archy|webhook|scene-only|none (default: archy if mem_enabled, else scene-only)
+webhook_url: POST target URL for webhook backend
+webhook_headers_json: JSON string of static HTTP headers for webhook requests
 
 Guardrails: lockfile, 20K char cap, 60s timeout, dedup via state file.
 Exit 0 = success (memories extracted), 1 = skipped (dedup/lock/insufficient), 2 = LLM failure.
@@ -234,22 +240,57 @@ def git_commit_scene_files(scene_dir):
     except Exception as e:
         print(f"git error (non-fatal): {e}", file=sys.stderr)
 
-def store_memories(memories, mem_enabled, mem_path, scene_dir=None):
+def store_via_webhook(memories, webhook_url, webhook_headers):
+    import urllib.request as _req
     stored = 0
-    if mem_enabled:
+    headers = {"Content-Type": "application/json"}
+    headers.update(webhook_headers or {})
+    for m in memories:
+        payload = json.dumps({
+            "type": m["type"],
+            "salience": float(m["salience"]),
+            "scene": m["scene"],
+            "content": m["content"],
+            "source": "session-janitor",
+            "timestamp": datetime.now().isoformat(),
+        }).encode()
+        try:
+            req = _req.Request(webhook_url, data=payload, headers=headers, method="POST")
+            with _req.urlopen(req, timeout=10) as r:
+                if r.status < 300:
+                    stored += 1
+                else:
+                    print(f"webhook HTTP {r.status}", file=sys.stderr)
+        except Exception as e:
+            print(f"webhook error: {e}", file=sys.stderr)
+    return stored
+
+
+def store_memories(memories, mem_enabled, mem_path, scene_dir=None, backend_type="", webhook_url="", webhook_headers=None):
+    stored = 0
+    effective = backend_type or ("archy" if mem_enabled else "scene-only")
+
+    if effective == "archy" and mem_enabled:
         for mem in memories:
             try:
                 result = subprocess.run(
                     [mem_path, "quick-store", mem["scene"], mem["type"], str(mem["salience"]), mem["content"]],
                     capture_output=True, text=True, timeout=10
                 )
-                if result.returncode == 0: stored += 1
-                else: print(f"ERROR: mem store failed (rc={result.returncode}): {result.stderr.strip() or result.stdout.strip()}", file=sys.stderr)
+                if result.returncode == 0:
+                    stored += 1
+                else:
+                    print(f"ERROR: mem store failed (rc={result.returncode}): {result.stderr.strip() or result.stdout.strip()}", file=sys.stderr)
             except Exception as e:
                 print(f"mem store error: {e}", file=sys.stderr)
-    # Write to scene files (always, if path provided — DB is derived, files are durable)
+    elif effective == "webhook":
+        if webhook_url:
+            stored = store_via_webhook(memories, webhook_url, webhook_headers or {})
+        else:
+            print("webhook backend selected but no webhook_url configured", file=sys.stderr)
+
     scene_written = 0
-    if scene_dir:
+    if scene_dir and effective != "none":
         scene_written = write_to_scene_files(memories, scene_dir)
         if scene_written > 0:
             git_commit_scene_files(scene_dir)
@@ -271,6 +312,13 @@ def main():
     api_timeout_secs = int(sys.argv[13]) if len(sys.argv) > 13 else DEFAULT_API_TIMEOUT_SECS
     max_memories = int(sys.argv[14]) if len(sys.argv) > 14 else DEFAULT_MAX_MEMORIES
     min_archived = int(sys.argv[15]) if len(sys.argv) > 15 else DEFAULT_MIN_ARCHIVED
+    backend_type = sys.argv[16] if len(sys.argv) > 16 else ""
+    webhook_url  = sys.argv[17] if len(sys.argv) > 17 else ""
+    webhook_headers_raw = sys.argv[18] if len(sys.argv) > 18 else "{}"
+    try:
+        webhook_headers = json.loads(webhook_headers_raw)
+    except Exception:
+        webhook_headers = {}
 
     # Lockfile
     lock_fd = None
@@ -325,7 +373,7 @@ def main():
             print("LLM returned no valid memories")
             sys.exit(1)
 
-        stored = store_memories(memories, mem_enabled, mem_path, scene_dir)
+        stored = store_memories(memories, mem_enabled, mem_path, scene_dir, backend_type, webhook_url, webhook_headers)
         print(f"Extracted {len(memories)} memories, stored {stored} to mem DB")
 
         # Update dedup state

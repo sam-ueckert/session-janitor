@@ -198,9 +198,11 @@ def parse_memories(llm_output, max_memories):
 
 # ── Storage ───────────────────────────────────────────────────────────────────
 
-def store_memories(memories, mem_enabled, mem_path, scene_dir):
+def store_memories(memories, backend_type, mem_path, scene_dir, webhook_url="", webhook_headers=None):
     stored = 0
-    if mem_enabled:
+    effective = backend_type or ("archy" if mem_path else "scene-only")
+
+    if effective == "archy" and mem_path:
         for m in memories:
             try:
                 r = subprocess.run(
@@ -213,13 +215,44 @@ def store_memories(memories, mem_enabled, mem_path, scene_dir):
                     print(f"mem store failed: {r.stderr.strip() or r.stdout.strip()}", file=sys.stderr)
             except Exception as e:
                 print(f"mem store error: {e}", file=sys.stderr)
+    elif effective == "webhook":
+        if webhook_url:
+            stored = _store_via_webhook(memories, webhook_url, webhook_headers or {})
+        else:
+            print("webhook backend selected but no webhook_url configured", file=sys.stderr)
 
-    if scene_dir and os.path.isdir(scene_dir):
+    if scene_dir and os.path.isdir(scene_dir) and effective != "none":
         written = _write_scene_files(memories, scene_dir)
         if written:
             _git_commit(scene_dir)
             print(f"Wrote {written} memories to scene files")
 
+    return stored
+
+
+def _store_via_webhook(memories, webhook_url, webhook_headers):
+    import urllib.request
+    stored = 0
+    headers = {"Content-Type": "application/json"}
+    headers.update(webhook_headers or {})
+    for m in memories:
+        payload = json.dumps({
+            "type": m["type"],
+            "salience": float(m["salience"]),
+            "scene": m["scene"],
+            "content": m["content"],
+            "source": "session-janitor",
+            "timestamp": datetime.now().isoformat(),
+        }).encode()
+        try:
+            req = urllib.request.Request(webhook_url, data=payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as r:
+                if r.status < 300:
+                    stored += 1
+                else:
+                    print(f"webhook HTTP {r.status}", file=sys.stderr)
+        except Exception as e:
+            print(f"webhook error: {e}", file=sys.stderr)
     return stored
 
 
@@ -331,7 +364,13 @@ def run_transcript(args):
         print("No valid memories extracted")
         sys.exit(1)
 
-    stored = store_memories(memories, args.mem_enabled, args.mem_path, args.scene_dir)
+    backend = args.mem_backend or ("archy" if args.mem_enabled else "scene-only")
+    try:
+        wh_headers = json.loads(args.webhook_headers_json)
+    except Exception:
+        wh_headers = {}
+    stored = store_memories(memories, backend, args.mem_path, args.scene_dir,
+                            webhook_url=args.webhook_url, webhook_headers=wh_headers)
     print(f"Extracted {len(memories)} memories, stored {stored} to mem DB")
     save_state(args.state, state, dedup_key, memories, stored, len(text))
 
@@ -371,7 +410,13 @@ def run_markdown(args):
         print("No valid memories extracted")
         sys.exit(1)
 
-    stored = store_memories(memories, args.mem_enabled, args.mem_path, args.scene_dir)
+    backend = args.mem_backend or ("archy" if args.mem_enabled else "scene-only")
+    try:
+        wh_headers = json.loads(args.webhook_headers_json)
+    except Exception:
+        wh_headers = {}
+    stored = store_memories(memories, backend, args.mem_path, args.scene_dir,
+                            webhook_url=args.webhook_url, webhook_headers=wh_headers)
     print(f"Extracted {len(memories)}, stored {stored} to mem DB")
     save_state(args.state, state, dedup_key, memories, stored, len(content))
 
@@ -391,6 +436,12 @@ def main():
         p.add_argument("--mem-enabled", action="store_true")
         p.add_argument("--mem-path", default="/home/swabby/bin/mem")
         p.add_argument("--scene-dir", default=None)
+        p.add_argument("--mem-backend", default="",
+            help="Memory backend: archy|webhook|scene-only|none (default: archy if --mem-enabled, else scene-only)")
+        p.add_argument("--webhook-url", default="",
+            help="POST target URL for webhook backend")
+        p.add_argument("--webhook-headers-json", default="{}",
+            help="JSON string of static HTTP headers for webhook requests")
         p.add_argument("--model", default="openclaw")
         p.add_argument("--max-chars", type=int, default=20000)
         p.add_argument("--timeout", type=int, default=90)
