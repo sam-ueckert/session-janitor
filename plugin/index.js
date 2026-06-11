@@ -66,6 +66,47 @@ export default {
     function sk(event, ctx) { return event?.sessionKey ?? ctx?.sessionKey ?? null; }
     function sid(event, ctx) { return event?.sessionId ?? ctx?.sessionId ?? null; }
 
+    // Resolve transcript path from sessions.json when the hook event omits it.
+    // OC does NOT reliably populate event.transcriptPath, but sessions.json
+    // stores `sessionFile` (full path) per session key. We resolve from there,
+    // searching across gateway store dirs so this works for both gateways.
+    const STORE_DIRS = (cfg.gateways ?? [])
+      .map((g) => g.sessionsDir)
+      .filter(Boolean);
+    // Fallback: derive from this gateway's own location if not configured.
+    function candidateSessionsJsonPaths() {
+      const paths = [];
+      for (const d of STORE_DIRS) paths.push(path.join(d, "sessions.json"));
+      // Common layouts relative to HOME
+      const home = process.env.HOME ?? "";
+      for (const gw of [".openclaw-slack", ".openclaw-discord", ".openclaw"]) {
+        paths.push(path.join(home, gw, "agents", "main", "sessions", "sessions.json"));
+      }
+      return [...new Set(paths)];
+    }
+    function resolveTranscriptFromStore(key, id) {
+      for (const sjPath of candidateSessionsJsonPaths()) {
+        try {
+          if (!fs.existsSync(sjPath)) continue;
+          const data = JSON.parse(fs.readFileSync(sjPath, "utf8"));
+          const sessions = data.sessions ?? data;
+          const entry = (key && sessions[key]) || null;
+          let file = entry?.sessionFile ?? entry?.transcriptPath ?? null;
+          // If keyed lookup failed, try matching by sessionId across entries.
+          if (!file && id) {
+            for (const v of Object.values(sessions)) {
+              if (v && typeof v === "object" && v.sessionId === id) {
+                file = v.sessionFile ?? v.transcriptPath ?? null;
+                if (file) break;
+              }
+            }
+          }
+          if (file && fs.existsSync(file)) return file;
+        } catch { /* try next */ }
+      }
+      return null;
+    }
+
     function latestPreTrimFile(transcriptPath) {
       const dir = path.dirname(transcriptPath);
       const base = path.basename(transcriptPath);
@@ -96,13 +137,18 @@ export default {
     // checks file integrity after the hook returns.
     // This hook only caches the transcript path for agent_end to use.
     api.on("before_agent_finalize", (event, ctx) => {
-      const { transcriptPath, sessionId: id, sessionKey: key } = event;
-      if (!transcriptPath || !key || key.includes(":subagent:")) return;
+      const key = event?.sessionKey ?? ctx?.sessionKey ?? null;
+      const id = event?.sessionId ?? ctx?.sessionId ?? null;
+      let { transcriptPath } = event;
+      if (!key || key.includes(":subagent:")) return;
       const state = sessionState.get(key) ?? { sessionId: id };
-      state.transcriptPath = transcriptPath;
-      state.gateway = path.basename(
-        path.dirname(path.dirname(path.dirname(transcriptPath)))
-      );
+      if (transcriptPath) {
+        state.transcriptPath = transcriptPath;
+        state.gateway = path.basename(
+          path.dirname(path.dirname(path.dirname(transcriptPath)))
+        );
+      }
+      if (id) state.sessionId = id;
       sessionState.set(key, state);
     });
 
@@ -116,14 +162,31 @@ export default {
       if (!key || key.includes(":subagent:")) return;
 
       const state = sessionState.get(key);
-      const transcriptPath = state?.transcriptPath;
+      const id = state?.sessionId ?? sid(event, ctx);
+      // Prefer cached path from before_agent_finalize; fall back to sessions.json.
+      let transcriptPath = state?.transcriptPath;
+      if (!transcriptPath || !fs.existsSync(transcriptPath)) {
+        const resolved = resolveTranscriptFromStore(key, id);
+        if (resolved) {
+          transcriptPath = resolved;
+          const st = sessionState.get(key) ?? { sessionId: id };
+          st.transcriptPath = resolved;
+          st.gateway = path.basename(
+            path.dirname(path.dirname(path.dirname(resolved)))
+          );
+          if (id) st.sessionId = id;
+          sessionState.set(key, st);
+        }
+      }
 
+      const finalState = sessionState.get(key) ?? state;
       if (transcriptPath && fs.existsSync(transcriptPath)) {
         const sizeBefore = fileSizeKb(transcriptPath);
         if (sizeBefore > trimMaxKb) {
-          const id = state?.sessionId ?? path.basename(transcriptPath, ".jsonl");
-          const gateway = state?.gateway ?? "unknown";
-          info(`${id.slice(0, 8)}: ${sizeBefore}KB — spawning detached sidecar+trim`);
+          const tid = finalState?.sessionId ?? id ?? path.basename(transcriptPath, ".jsonl");
+          const gateway = finalState?.gateway
+            ?? path.basename(path.dirname(path.dirname(path.dirname(transcriptPath))));
+          info(`${tid.slice(0, 8)}: ${sizeBefore}KB — spawning detached sidecar+trim`);
 
           // Detached: returns immediately; process runs after OC releases session
           spawn(
@@ -131,7 +194,7 @@ export default {
             [
               path.join(scriptsDir, "trim-with-sidecar.sh"),
               transcriptPath,
-              id,
+              tid,
               gateway,
               stateFile,
               String(keepPairs),
