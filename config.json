@@ -21,7 +21,7 @@
   "minArchivePairs": 5,
   "trimFullThresholdPct": 50,
   "archiveRetentionDays": 7,
-  "orphanGraceMinutes": 30,
+  "orphanGraceMinutes": 10,
   "staleSubagentHours": 24,
   "staleCronSessionHours": 24,
   "llmExtraction": {
@@ -57,6 +57,6 @@
   "watchdog": {
     "enabled": false
   },
-  "cronSchedule": "disabled",
+  "cronSchedule": "*/15 * * * *",
   "logFile": "/tmp/session-janitor.log"
 }
