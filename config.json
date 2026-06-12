@@ -15,8 +15,8 @@
       "token": "aee524da0214f9a1616e00c1d769eba03721c9c7e79133cd"
     }
   ],
-  "trimMaxKB": 250,
-  "keepPairs": 8,
+  "trimMaxKB": 100,
+  "keepPairs": 5,
   "keepFullPairs": 4,
   "minArchivePairs": 5,
   "trimFullThresholdPct": 50,
