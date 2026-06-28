@@ -58,5 +58,7 @@
     "enabled": false
   },
   "cronSchedule": "*/15 * * * *",
-  "logFile": "/tmp/session-janitor.log"
+  "logFile": "/tmp/session-janitor.log",
+  "forceTrimStaleMins": 5,
+  "trimForceKB": 150
 }
