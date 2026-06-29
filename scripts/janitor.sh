@@ -119,6 +119,64 @@ for v in d.get('sessions', d).values():
     local orphan_count=0 archive_rm_count=0 reset_count=0
 
     shopt -s nullglob
+
+    # ── LLM extraction from pre-trim files (active sessions) ──────────────────
+    # Pre-trim files come from two sources:
+    #   1. Gateway auto-compaction (at ~200KB) writes .pre-trim.* archives
+    #   2. trim.py (via OC plugin agent_end hook) writes .pre-trim.* archives
+    # The watcher's extractOnTrim is gated behind the turn_state check (which
+    # always blocks for active sessions), and the OC plugin's pendingPreTrimFile
+    # code path is dead.  This step closes the gap: extract from pre-trim
+    # archives directly — safe because we read static files, not live transcripts.
+    # Process ALL pre-trim files regardless of session state (inactive sessions
+    # may have been compacted but their pre-trim archives are still valuable).
+    if [[ "$LLM_ENABLED" == "true" ]]; then
+        local pt_extract_count=0
+        for pt in "$sessions_dir"/*.jsonl.pre-trim.*; do
+            [[ -f "$pt" ]] || continue
+            (( pt_extract_count >= LLM_MAX_PER_RUN )) && break
+            (( LLM_EXTRACTIONS_THIS_RUN >= LLM_MAX_PER_RUN )) && break
+
+            local pt_sid
+            pt_sid=$(basename "$pt" | sed 's/\.jsonl\.pre-trim\..*//')
+
+            # Build --trimmed arg if current transcript exists (for diff extraction)
+            local pt_trimmed="$sessions_dir/${pt_sid}.jsonl"
+            local trimmed_arg=""
+            if [[ -f "$pt_trimmed" ]]; then
+                trimmed_arg="--trimmed $pt_trimmed"
+            fi
+
+            log "$name: extracting from pre-trim: $(basename "$pt")"
+            if python3 "$SCRIPTS_DIR/extract.py" transcript "$pt" \
+                $trimmed_arg --sid "$pt_sid" \
+                --state "$STATE_FILE" \
+                --api-url "http://127.0.0.1:${LLM_PORT}" --api-token "$LLM_TOKEN" \
+                $([ "$MEM_ENABLED" = "true" ] && echo "--mem-enabled") \
+                --mem-path "$MEM_PATH" \
+                --mem-backend "$MEM_BACKEND_TYPE" \
+                --webhook-url "$MEM_BACKEND_WEBHOOK_URL" \
+                --webhook-headers-json "$MEM_BACKEND_WEBHOOK_HEADERS" \
+                --scene-dir "$SCENE_FILES_PATH" \
+                --model "$LLM_MODEL" \
+                --max-chars "$LLM_MAX_INPUT_CHARS" \
+                --timeout "$LLM_TIMEOUT_SECS" \
+                --max-memories "$LLM_MAX_MEMORIES" \
+                --min-archived "$LLM_MIN_ARCHIVED" 2>&1; then
+                pt_extract_count=$((pt_extract_count + 1))
+                LLM_EXTRACTIONS_THIS_RUN=$((LLM_EXTRACTIONS_THIS_RUN + 1))
+                log "$name: extraction complete — $(basename "$pt")"
+            else
+                local ec=$?
+                if [[ $ec -eq 2 ]]; then
+                    log "ERROR: $name: LLM extraction FAILED for pre-trim $(basename "$pt")"
+                fi
+            fi
+        done
+        (( pt_extract_count > 0 )) && log "$name: extracted from $pt_extract_count pre-trim file(s)"
+    fi
+    # ── end pre-trim extraction ───────────────────────────────────────────────
+
     for jsonl in "$sessions_dir"/*.jsonl; do
         [[ "$jsonl" == *".reset."* ]] && continue
         [[ "$jsonl" == *".deleted."* ]] && continue
@@ -258,6 +316,58 @@ PYEOF
             ptr_orphan_count=$((ptr_orphan_count + 1))
         done <<< "$ptr_orphan_sids"
         log "$name: total pointer-orphan entries removed: $ptr_orphan_count"
+    fi
+
+    # --- Bloated killed/aborted session cleanup ---
+    # Sessions marked killed/aborted with high token counts (>150K) are dead weight.
+    # They inflate watchdog alerts and waste memory. Remove the sessions.json entry
+    # and archive the JSONL (same treatment as orphans).
+    local bloated_killed_count=0
+    local bloated_killed_sids
+    bloated_killed_sids=$(python3 - "$sessions_json" "$sessions_dir" 150000 <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+sessions_dir = sys.argv[2]
+token_thresh = int(sys.argv[3])
+try:
+    d = json.load(open(path))
+except Exception:
+    sys.exit(0)
+sessions = d.get('sessions', d)
+to_del = []
+for key, v in sessions.items():
+    status = v.get('status', '')
+    if status not in ('killed', 'aborted'):
+        continue
+    tok = v.get('totalTokens', 0) or 0
+    if tok <= token_thresh:
+        continue
+    sid = v.get('sessionId', '')
+    if not sid:
+        continue
+    to_del.append((key, sid, tok))
+for key, sid, tok in to_del:
+    del sessions[key]
+    jsonl = os.path.join(sessions_dir, sid + '.jsonl')
+    if os.path.exists(jsonl):
+        # Archive it with .killed-bloat suffix so it's distinguishable from normal orphans
+        archived = jsonl + '.killed-bloat.' + __import__('datetime').datetime.utcnow().strftime('%Y-%m-%dT%H-%M-%SZ')
+        os.rename(jsonl, archived)
+    print(f'{sid}|{key}|{tok}')
+if to_del:
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, path)
+PYEOF
+)
+    if [[ -n "$bloated_killed_sids" ]]; then
+        while IFS='|' read -r bk_sid bk_key bk_tok; do
+            [[ -z "$bk_sid" ]] && continue
+            log "$name: BLOAT-CLEAN killed session $bk_sid ($bk_tok tokens) — archived + removed from sessions.json"
+            bloated_killed_count=$((bloated_killed_count + 1))
+        done <<< "$bloated_killed_sids"
+        log "$name: bloat-clean removed $bloated_killed_count killed/aborted bloated session(s)"
     fi
 
     # --- Prune stale session entries ---
