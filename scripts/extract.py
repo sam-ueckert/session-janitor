@@ -92,7 +92,7 @@ def extract_archived_content(pre_trim_file, trimmed_file):
                 except: pass
 
     kept_ids = set()
-    if trimmed_file != pre_trim_file:
+    if trimmed_file != pre_trim_file and os.path.exists(trimmed_file):
         with open(trimmed_file) as f:
             for line in f:
                 line = line.strip()
@@ -283,7 +283,23 @@ def _git_commit(scene_dir):
                                capture_output=True, timeout=5)
             if r.returncode != 0:
                 changed.append(rel)
-        if not changed: return
+        if not changed:
+            return
+
+        # Stash any unrelated dirty files so pull --rebase can work cleanly.
+        # We only care about pushing scene file changes.
+        stash_needed = False
+        sr = subprocess.run(["git", "-C", repo_dir, "diff", "--quiet"],
+                            capture_output=True, timeout=5)
+        if sr.returncode != 0:
+            subprocess.run(["git", "-C", repo_dir, "stash", "--include-untracked",
+                            "-m", "extract-auto-stash"], timeout=10, check=False)
+            stash_needed = True
+
+        # Pull first so we're fast-forwardable
+        subprocess.run(["git", "-C", repo_dir, "pull", "--rebase"], timeout=30, check=True)
+
+        # Now stage, commit, and push just scene files
         for rel in changed:
             subprocess.run(["git", "-C", repo_dir, "add", rel], timeout=5, check=True)
         subprocess.run(["git", "-C", repo_dir, "commit", "-m",
@@ -291,6 +307,11 @@ def _git_commit(scene_dir):
                        timeout=10, check=True)
         subprocess.run(["git", "-C", repo_dir, "push"], timeout=30, check=True)
         print(f"Committed and pushed {len(changed)} scene file(s)")
+
+        # Pop stash if we stashed
+        if stash_needed:
+            subprocess.run(["git", "-C", repo_dir, "stash", "pop"],
+                           timeout=10, check=False)
     except Exception as e:
         print(f"git commit non-fatal: {e}", file=sys.stderr)
 

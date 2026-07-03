@@ -18,7 +18,7 @@ for k, v in sessions.items():
     age_h = (now - updated) / 3600
     status = v.get("status", "")
 
-    if ":subagent:" in k:
+    if ":subagent:" in k or ":openai:" in k:
         # Done sub-agents: prune immediately (no grace period needed)
         if status == "done":
             to_prune.append(k)

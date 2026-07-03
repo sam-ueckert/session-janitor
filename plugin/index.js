@@ -261,9 +261,97 @@ export default {
     });
 
     // ── Hook: gateway_start ───────────────────────────────────────────────────
-    api.on("gateway_start", (event) => {
+    // Runs BEFORE main-session-restart-recovery's 5-second delayed recovery
+    // attempt. Repairs session JSONL tails so interrupted turns become
+    // auto-resumable instead of requiring the user to re-send.
+    api.on("gateway_start", async (event) => {
       info(`active on port ${event?.port ?? "?"} — hooks: session_start, session_end, before_agent_finalize, agent_end, gateway_start`);
       console.log(`[session-janitor] GATEWAY_START fired on port ${event?.port}`);
+
+      // Repair incomplete assistant turn tails left by mid-stream SIGTERM.
+      // When the tail is an assistant message with no real content (only unsigned
+      // thinking blocks, which are invalid signatures from an interrupted stream),
+      // remove it so the tail becomes the original user message. That makes
+      // isResumableTailMessage() return true and recoverStartupOrphanedMainSessions
+      // will auto-retry the turn via buildResumeMessage injection.
+      let repairedCount = 0;
+      const seenFiles = new Set();
+      for (const sjPath of candidateSessionsJsonPaths()) {
+        if (!fs.existsSync(sjPath)) continue;
+        let store;
+        try { store = JSON.parse(fs.readFileSync(sjPath, "utf8")); } catch { continue; }
+        const sessions = store.sessions ?? store;
+        if (!sessions || typeof sessions !== "object") continue;
+
+        for (const [sessionKey, entry] of Object.entries(sessions)) {
+          if (!entry || entry.status !== "running") continue;
+          // Skip subagent/cron sessions — restart-recovery skips them too
+          if (sessionKey.includes(":subagent:") || sessionKey.includes(":cron:")) continue;
+
+          const file = entry.sessionFile ?? entry.transcriptPath;
+          if (!file || seenFiles.has(file) || !fs.existsSync(file)) continue;
+          seenFiles.add(file);
+
+          try {
+            const raw = fs.readFileSync(file, "utf8");
+            const lines = raw.split(/\r?\n/).filter((l) => l.trim());
+            const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } });
+
+            // Find the last assistant message
+            let lastAsstIdx = -1;
+            for (let i = parsed.length - 1; i >= 0; i--) {
+              const e = parsed[i];
+              if (e?.type === "message" && e?.message?.role === "assistant") {
+                lastAsstIdx = i;
+                break;
+              }
+            }
+            if (lastAsstIdx === -1) continue;
+
+            // Only act if the assistant turn is the effective tail
+            // (nothing after it except orphaned tool results)
+            const after = parsed.slice(lastAsstIdx + 1);
+            const isTail = after.every(
+              (e) => !e || e?.type !== "message" ||
+                     e?.message?.role === "toolResult" || e?.message?.role === "tool"
+            );
+            if (!isTail) continue;
+
+            const content = parsed[lastAsstIdx]?.message?.content ?? [];
+            if (!Array.isArray(content)) continue;
+
+            // Strip unsigned thinking blocks (no signature field or empty string)
+            const stripped = content.filter((b) => {
+              if (!b || (b.type !== "thinking" && b.type !== "redacted_thinking")) return true;
+              const sig = b.signature ?? b.thinkingSignature ?? b.thought_signature ?? "";
+              return typeof sig === "string" && sig.trim().length > 0;
+            });
+
+            // Keep the turn if it still has non-thinking content (text, tool calls)
+            const hasReal = stripped.some(
+              (b) => b.type !== "thinking" && b.type !== "redacted_thinking"
+            );
+            if (stripped.length > 0 && hasReal) continue;
+
+            // Remove the incomplete turn + any orphaned trailing tool results
+            const kept = lines.slice(0, lastAsstIdx);
+            const backupPath = `${file}.pre-restart-repair.${Date.now()}`;
+            fs.writeFileSync(backupPath, raw, "utf8");
+            fs.writeFileSync(file, kept.join("\n") + (kept.length ? "\n" : ""), "utf8");
+
+            const id = path.basename(file, ".jsonl").slice(0, 8);
+            const nUnsigned = content.length - stripped.length;
+            info(`${id}: removed incomplete tail (${nUnsigned} unsigned thinking, ${after.length} orphaned tool result(s)) — session resumable`);
+            repairedCount++;
+          } catch (err) {
+            warn(`tail repair failed for ${path.basename(file)}: ${err.message}`);
+          }
+        }
+      }
+
+      if (repairedCount > 0) {
+        info(`repaired ${repairedCount} interrupted session tail(s) — restart-recovery will auto-retry`);
+      }
     });
 
     info(`registered: session_start, session_end, before_agent_finalize, agent_end, gateway_start`);
