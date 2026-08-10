@@ -5,7 +5,7 @@
       "configDir": "/home/swabby/.openclaw-discord",
       "sessionsDir": "/home/swabby/.openclaw-discord/agents/main/sessions",
       "port": 18790,
-      "token": "aee524da0214f9a1616e00c1d769eba03721c9c7e79133cd"
+      "token": "3dd1963527ee7d35629cccc5b6d3d1c21ccb3c31e33f159a"
     },
     {
       "name": "slack",
@@ -26,7 +26,7 @@
   "staleCronSessionHours": 24,
   "llmExtraction": {
     "enabled": true,
-    "gateway": "slack",
+    "gateway": "discord",
     "maxPerRun": 5,
     "model": "openclaw",
     "maxInputChars": 20000,
